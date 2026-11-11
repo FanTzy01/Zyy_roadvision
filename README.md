@@ -1,10 +1,19 @@
-# ZYY-ROAD VISION v3.0 — People, Vehicle & Unique Object Log
+# ZYY-ROAD VISION v3.1 — Patching Human + Vehicle Detection
 
-Proyek website statis untuk GitHub Pages. Menjalankan deteksi `person`, `car`, `motorcycle`, `bus`, `truck`, dan `bicycle` di browser dengan TensorFlow.js + COCO-SSD. Fitur v2.0 (kamera HP, video lokal, deteksi marka berbasis tepi, estimasi jarak kendaraan, Depth Map relatif, dan ekspor rekaman dengan overlay) tetap tersedia.
+Aplikasi statis browser untuk Android/Chrome (GitHub Pages), dengan video diproses lokal. Mempertahankan fitur v3.0: kamera depan/belakang, unggah klip uji, rekam overlay, foto, marka jalan eksperimental, Depth Map opsional, CSV, log objek unik, profil Zyy, QR/manual ID, dan kalibrasi perkiraan tinggi.
 
-## Berkas yang perlu diunggah
+## Apa yang diperbaiki
 
-```text
+1. **Tiga jalur analisis manusia** yang berjalan independen: COCO-SSD (`person`/tubuh), MediaPipe Face Detector (hanya wajah), MediaPipe Pose Landmarker (postur sebagian). Hasilnya digabung: wajah di dalam kotak tubuh tidak membuat catatan manusia kedua.
+2. **Kendaraan beragam:** COCO-SSD untuk mobil, motor, truk, bus, sepeda, kereta, pesawat dan perahu (kelas yang didukung dataset COCO); ada **fallback MediaPipe EfficientDet Lite0** jika COCO-SSD gagal dimuat. Kelas-kelas itu tidak menjamin semua kendaraan dapat dikenali di segala kondisi.
+3. **Sensitivitas awal 35%** (dapat diubah 20–90%). Lebih sensitif berarti potensi deteksi palsu juga meningkat.
+4. **Tracking dan log unik**: objek diberi ID ketika muncul dan tidak ditambah berulang kali pada frame berikutnya selama asosiasi tracking tetap berhasil. Jika masuk lagi setelah tertutup/keluar lama, perangkat bisa memberi ID baru. Ada fitur penggabungan catatan manual.
+5. **AI Diagnostics**: tampilkan status Object AI, Face AI, Pose AI, jumlah analisis, pesan galat yang bertahan, dan tombol **Muat Ulang AI**.
+6. **Tinggi badan**: memerlukan kalibrasi dan deteksi tubuh utuh; tidak dihitung dari wajah saja karena tidak bisa diperkirakan secara andal.
+
+## Struktur GitHub
+
+```
 Zyy_roadvision/
 ├── index.html
 ├── style.css
@@ -14,42 +23,28 @@ Zyy_roadvision/
     └── zyy-badge.png
 ```
 
-Upload **semua file dan folder**, menjaga struktur persis seperti di atas. `README.md` opsional. `app.js` adalah JavaScript browser, **bukan** Google Apps Script. File foto pengguna di folder `assets` akan dapat diakses publik jika repository/GitHub Pages bersifat publik. Jika tidak ingin foto tersebut terbuka, jangan unggah berkas itu dan ganti dengan avatar nonpersonal melalui `src` pada `index.html`.
+Upload semua file dan folder tersebut ke **akar repository** `FanTzy01/Zyy_roadvision` pada branch `main`, lalu Commit changes. Pastikan GitHub Pages di Settings → Pages → Deploy from branch → `main` → `/(root)`. Buka `https://fantzy01.github.io/Zyy_roadvision/` dan reload paksa atau tab samaran (cache lama dapat membuat script v3.0 masih berjalan). GitHub Pages membutuhkan HTTPS untuk izin kamera. Di Chrome Android klik **Mulai Kamera** atau pilih **Uji Video** untuk menguji dari rekaman.
 
-### Upgrade dari v2.0 di GitHub
+## Diagnosis jika tidak mendeteksi
 
-1. Ekstrak ZIP di komputer.
-2. Buka `https://github.com/FanTzy01/Zyy_roadvision`, pilih `Code`, branch `main`, lalu `Add file → Upload files`.
-3. Unggah `index.html`, `style.css`, `app.js` yang baru sehingga menggantikan versi sebelumnya, **dan** folder `assets/` beserta kedua gambarnya. Jika browser tidak mendukung menyeret folder, unggah melalui GitHub Desktop/git CLI atau buat direktori `assets` di repository lalu letakkan kedua gambar di sana.
-4. `Commit changes` ke `main`. Pada `Settings → Pages` gunakan `Deploy from a branch` / `main` / `/(root)`.
-5. Setelah deploy, buka `https://fantzy01.github.io/Zyy_roadvision/` dan lakukan hard refresh atau tab samaran jika masih versi lama.
-6. Gunakan HTTPS. Izinkan kamera HP; untuk file rekaman, klik `Uji Video`.
+- Periksa **SYSTEM STATUS** dan baris `Object AI`, `Face AI`, `Pose AI`. Minimal satu harus `Aktif`. `Kamera aktif` saja **tidak berarti AI sudah siap**.
+- Tunggu unduhan model pertama kali, gunakan koneksi internet yang stabil. Model memakai beberapa CDN dan `storage.googleapis.com`, yang dapat gagal bila diblokir jaringan/ekstensi/ISP.
+- Jika muncul `Gagal library`, `Gagal WebAssembly`, atau `Gagal model`: tekan **Muat Ulang AI**. Coba Chrome terbaru. Matikan VPN/ad-blocker yang menghalangi CDN. Lihat pesan tepat dalam panel merah (`AI ERROR`).
+- Coba tampilkan wajah dari depan dalam cahaya cukup pada jarak yang jelas, lalu uji kendaraan. Saat model Object AI aktif, objek yang didukung dan memenuhi skor akan muncul dengan kotak.
+- Jika HP melambat, nonaktifkan Depth Map dan tutup aplikasi lain. Pose/Face berjalan pada CPU/WebAssembly dan performanya beragam.
+- Jika tombol berfungsi tetapi angka tetap `00`, kirim screenshot **SYSTEM STATUS** (berisi status ketiga model dan pesan error) bersama tipe HP/browser agar masalah bisa ditelusuri.
 
-## Fitur v3.0
+## Identitas Zyy
 
-1. **Deteksi manusia otomatis:** COCO-SSD mengenali kategori `person`, menggambar kotak dan probabilitas. **Tanpa fitur pengenalan wajah otomatis** atau pencarian identitas orang dari foto.
-2. **Profil dikenal Zyy:** foto pengguna ditampilkan pada kartu profil, dengan nama `Zyy` dan status `Zyy System Development`.
-3. **Identitas diketahui melalui QR atau manual:** untuk menandai track sebagai Zyy, tampilkan QR dalam kartu `Lihat QR identitas Zyy` di area tubuh yang terlihat kamera, atau pilih ID person dari dropdown lalu tekan `Tandai pilihan sebagai Zyy`. QR hanya badge sukarela dan dapat disalin, **bukan verifikasi identitas yang aman**. Jika browser tidak mendukung native BarcodeDetector, kode berusaha memakai `jsQR` dari CDN. Jika QR tidak terbaca, gunakan penandaan manual. Orang yang belum ditandai mendapat label `TIDAK DIKENALI` (artinya identitas belum ditetapkan, bukan kepastian orang asing).
-4. **Pencatatan kemunculan dan total unik:** track baru yang terdeteksi langsung masuk daftar otomatis dengan tanggal/waktu, jenis, ID, dan status. Track yang sama pada frame berulang tidak menambah hitungan. ID dilacak berdasarkan overlap dan posisi kotak. ID dapat terputus karena objek tertutup, perubahan gerak tajam, keluar lama, atau kamera berpindah. Untuk kemunculan yang terhitung dua kali, gunakan `Gabungkan catatan duplikat` pada dua ID **dengan jenis sama**. Badge Zyy yang terpasang pada track baru menggabungkannya dengan catatan Zyy terdahulu.
-5. **Penyimpanan lokal & CSV:** catatan disimpan di `localStorage` browser ini (maksimal 500 log terbaru), dan bisa diunduh CSV melalui tombol `Ekspor CSV`. `Reset Daftar` menghapus daftar dan memulai kembali. LocalStorage dapat hilang ketika browser dibersihkan, mode samaran, atau situs berganti alamat. Jika log penting, ekspor CSV secara berkala.
-6. **Estimasi tinggi badan:** *dinonaktifkan secara default.* Agar muncul angka, pilih person dengan seluruh tubuh masuk gambar, masukkan **tinggi acuan yang memang diketahui** dalam cm, lalu klik `Kalibrasi ID terpilih`. Sistem hanya memperkirakan tinggi pada orang dengan **posisi kaki pada kedalaman gambar hampir sama** dan seluruh tubuh terlihat. Jika kondisi ini tidak terpenuhi, sistem menampilkan `belum terukur`. Tinggi acuan tidak tersimpan setelah video/kamera ditutup. Estimasi tidak cocok untuk pengukuran antropometri resmi.
-7. **Perekaman dengan overlay:** kotak manusia/kendaraan, identitas yang ditandai, marka, jam, dan Depth Map bila diaktifkan ikut dalam rekaman lokal. Max 5 menit dan tanpa suara. Foto snapshot masih didukung.
+Foto `assets/zyy-profile.jpg` adalah **profil contoh yang ditampilkan**, bukan data pelatihan identifikasi wajah. **Wajah manusia bisa terdeteksi otomatis**, tetapi nama tidak dapat disimpulkan dari foto; orang yang belum diverifikasi akan tertulis **Tidak dikenali**. Untuk menampilkan `Zyy — Zyy System Development`, pilih ID orang di dropdown lalu `Tandai pilihan sebagai Zyy` atau tampilkan badge QR terdaftar saat kamera merekamnya. QR dapat disalin dan bukan keamanan autentikasi.
 
-## Batasan utama
+Jika repo publik, gambar di `assets` akan terlihat publik. Hapus/ganti dengan avatar jika tak ingin mempublikasikan foto.
 
-- **Tidak ada pengenalan wajah otomatis berbasis foto.** Foto profil **tidak** dicocokkan ke wajah kamera. Identitas melalui QR/manual membutuhkan persetujuan dan tidak boleh dianggap autentikasi untuk akses keamanan.
-- **Tidak ada deduplikasi sempurna untuk objek yang keluar lalu masuk lagi.** Tanpa identitas permanen, dua kendaraan serupa atau orang yang sama setelah keluar lama tidak selalu bisa dibedakan. Track yang sama di frame berurutan dihitung satu; gabungkan catatan manual ketika perlu.
-- **Tinggi badan bukan pengukuran pasti.** Perbandingan bbox sederhana hanya layak untuk orang pada kedalaman serupa dengan acuan, seluruh badan terlihat; distorsi perspektif, jarak, alas kaki, dan pose sangat memengaruhi hasil.
-- **Estimasi jarak kendaraan v2.0 dan Depth Map** tetap relatif/tidak terkalibrasi. Jangan digunakan untuk mengemudi, pengereman, pengamanan jalan, atau mengukur jarak aman.
-- Gunakan kamera dan perekaman hanya dengan memperhatikan persetujuan/privasi pihak terkait. Jangan mengoperasikan HP sambil mengemudi.
-- Pustaka COCO-SSD, TensorFlow.js, dan opsional Depth Anything V2 memerlukan koneksi internet untuk diunduh pertama kali. Performanya bergantung pada perangkat.
-- QR scanner native (`BarcodeDetector`) tidak didukung di semua browser; tersedia fallback `jsQR` yang juga memerlukan koneksi internet untuk diunduh.
+## Pengujian dan batasan
 
-## Hasil pengujian proyek
+- `node --check app.js`: lulus.
+- Browser Chromium dengan **deteksi sintetis (mock bounding boxes)**: 1 wajah + 1 mobil -> dua objek unik; pengulangan 8 kali -> dua objek; tambahan postur/tubuh yang tumpang tindih -> tetap dua objek; tanpa error JavaScript.
+- **Belum** dilakukan uji asli jaringan CDN, model sebenarnya, kamera HP fisik, atau perangkat sasaran. Sistem tidak menjamin menemukan semua manusia/kendaraan. Orang yang hanya terlihat sebagian (contoh satu lengan di balik tembok) mungkin tidak dikenali.
+- Perkiraan jarak/tinggi/Depth Map tidak terkalibrasi dan bukan pengukuran faktual maupun fitur keselamatan lalu lintas. Jangan operasikan HP saat mengemudi. Gunakan perekaman sesuai privasi dan persetujuan.
 
-- `node --check app.js` lulus.
-- Pengujian Chromium menggunakan bounding box **simulasi**: `person + car` menjadi 2 catatan, frame ulang tidak menambah total; penandaan Zyy, kalibrasi berdasarkan acuan, penggabungan duplikat, ekspor CSV, dan pemulihan log lokal lulus.
-- Uji visual desktop dan HP memakai video **simulasi**; bukan kamera HP asli atau validasi model AI dengan footage sesungguhnya.
-- Model COCO-SSD asli, Depth Anything asli, QR scanner fisik, dan performa HP fisik belum diuji end-to-end pada lingkungan ini. Untuk penggunaan lapangan, uji dan verifikasi dahulu pada perangkat yang digunakan.
-
-**Lisensi/pustaka rujukan:** [COCO-SSD](https://github.com/tensorflow/tfjs-models/tree/master/coco-ssd), [TensorFlow.js](https://www.tensorflow.org/js), [Transformers.js](https://huggingface.co/docs/transformers.js), [MDN BarcodeDetector](https://developer.mozilla.org/en-US/docs/Web/API/BarcodeDetector).
+Rujukan teknis: [COCO-SSD](https://github.com/tensorflow/tfjs-models/tree/master/coco-ssd) · [MediaPipe Face Detector](https://developers.google.com/edge/mediapipe/solutions/vision/face_detector/web_js) · [Pose Landmarker](https://developers.google.com/edge/mediapipe/solutions/vision/pose_landmarker) · [MediaPipe Object Detector](https://developers.google.com/edge/mediapipe/solutions/vision/object_detector).

@@ -1,4 +1,4 @@
-/* ZYY-ROAD VISION v3.0 — browser-only computer vision prototype.
+/* ZYY-ROAD VISION v3.1 — browser-only computer vision prototype.
  * Distance is an uncalibrated pinhole-camera estimate; depth is relative.
  * Do not use any output for collision avoidance or driving decisions.
  */
@@ -14,11 +14,11 @@ const laneInput = document.createElement('canvas');
 const laneInputCtx = laneInput.getContext('2d', { willReadFrequently: true });
 const depthInput = document.createElement('canvas');
 const depthInputCtx = depthInput.getContext('2d');
-const CLASSES = ['car', 'motorcycle', 'bus', 'truck', 'bicycle', 'person'];
-const NAMES = { car: 'MOBIL', motorcycle: 'MOTOR', bus: 'BUS', truck: 'TRUK', bicycle: 'SEPEDA', person: 'MANUSIA' };
-const COLORS = { car: '#13e9ff', motorcycle: '#ffc971', bus: '#7cffb4', truck: '#f4a6ff', bicycle: '#89baff', person: '#7bffd5' };
+const CLASSES = ['car', 'motorcycle', 'bus', 'truck', 'bicycle', 'train', 'boat', 'airplane', 'person'];
+const NAMES = { car: 'MOBIL', motorcycle: 'MOTOR', bus: 'BUS', truck: 'TRUK', bicycle: 'SEPEDA', train:'KERETA', boat:'PERAHU', airplane:'PESAWAT', person: 'MANUSIA' };
+const COLORS = { car: '#13e9ff', motorcycle: '#ffc971', bus: '#7cffb4', truck: '#f4a6ff', bicycle: '#89baff', train:'#ffea8d', boat:'#a6f0ff', airplane:'#e4a8ff', person: '#7bffd5' };
 const COUNTERS = { car: 'countCar', motorcycle: 'countMotorcycle', bus: 'countBus', truck: 'countTruck', bicycle: 'countBicycle' };
-const OBJECT_WIDTHS_M = { car: 1.8, motorcycle: .75, bus: 2.5, truck: 2.5, bicycle: .6 };
+const OBJECT_WIDTHS_M = { car: 1.8, motorcycle: .75, bus: 2.5, truck: 2.5, bicycle: .6, train:2.8,boat:2.0,airplane:7.0 };
 const MAX_RECORD_MS = 5 * 60 * 1000;
 
 let stream = null, mediaMode = null, fileUrl = null, facingMode = 'environment';
@@ -27,7 +27,7 @@ let animationId = null, detectionTimer = null, laneTimer = null, depthTimer = nu
 let lastRafTime = 0, displayedFps = 0, inferenceErrorCount = 0;
 let detections = [], tracks = [], nextTrackId = 1, everTracked = 0;
 let laneMarkers = { left: null, right: null }, laneLastUpdated = 0;
-let confidenceThreshold = .55, hfovDeg = 68;
+let confidenceThreshold = .35, hfovDeg = 68;
 let showLane = true, showTrail = true, showDepthOverlay = true;
 let depthEnabled = false, depthLoading = false, depthPipe = null, depthRawImage = null, depthValid = false;
 let depthGeneration = 0, depthBusy = false;
@@ -41,6 +41,27 @@ let eventLog = [], nextLogNumber = 1;
 let barcodeDetector = null, badgeScannerType = 'none', badgeBusy = false;
 let heightCalibration = null;
 let lastPeopleSelectKey = '';
+// Independent detectors: objects (COCO), faces and postures (MediaPipe).
+// Faces are detected, NOT matched against the registered person's photograph.
+let faceDetector=null, poseDetector=null, auxPromise=null, auxTimer=null;
+let mpObjectDetector=null, mpObjectPromise=null, mpPkg=null, mpVision=null, objectFailed=false;
+let objectBatch=[], faceBatch=[], poseBatch=[];
+let objectBatchAt=0, faceBatchAt=0, poseBatchAt=0, lastInferenceAt=0;
+let inferCount=0, emptyFrames=0, lastAiError='', objectLoopSession=-1;
+const MP_VERSION='0.10.22';
+const MP_CDN=`https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@${MP_VERSION}`;
+const FACE_MODEL='https://storage.googleapis.com/mediapipe-models/face_detector/blaze_face_short_range/float16/1/blaze_face_short_range.tflite';
+const POSE_MODEL='https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task';
+function showAiProblem(part,error){
+  lastAiError=`${part}: ${error?.message || String(error)}`;
+  $('aiErrorDetails').textContent=lastAiError;
+  $('aiErrorDetails').hidden=false;
+  $('cameraHint').textContent='Sebagian model AI tidak siap; lihat status sistem di bawah.';
+  console.error('[ZYY-RV AI]',part,error);
+}
+function setEngineStatus(id,value){$(id).textContent=value;}
+function resetBatches(){objectBatch=[];faceBatch=[];poseBatch=[];objectBatchAt=faceBatchAt=poseBatchAt=0;emptyFrames=0;}
+
 
 
 const isSecureCameraContext = () => window.isSecureContext && !!navigator.mediaDevices?.getUserMedia;
@@ -79,10 +100,10 @@ function refreshButtons() {
   $('recIndicator').hidden = !recording;
   $('downloadBtn').disabled = !lastRecordingBlob;
   $('stateDot').classList.toggle('live', active);
-  $('headerStatus').textContent = active ? (model ? 'AI ONLINE' : 'VIDEO ONLINE') : 'STANDBY';
+  $('headerStatus').textContent = active ? ((model||mpObjectDetector||faceDetector||poseDetector) ? 'AI ONLINE' : 'VIDEO ONLINE / AI LOADING') : 'STANDBY';
   $('cameraLabel').textContent = !active ? 'CAMERA OFFLINE' : (mediaMode === 'file' ? 'LOCAL VIDEO' : (facingMode === 'environment' ? 'REAR CAMERA' : 'FRONT CAMERA'));
   $('cameraStatus').textContent = !active ? 'Offline' : (mediaMode === 'file' ? 'Video lokal' : 'Kamera aktif');
-  $('cameraFloating').hidden = !active || !model;
+  $('cameraFloating').hidden = !active || !(model||mpObjectDetector||faceDetector||poseDetector);
   $('laneFloating').hidden = !active || !showLane;
   $('assignZyyBtn').disabled = !getSelectedPersonTrack();
   $('calibrateBtn').disabled = !getSelectedPersonTrack();
@@ -91,8 +112,8 @@ function refreshButtons() {
 }
 
 function resetSessionAnalytics() {
-  detections = []; tracks = []; nextTrackId = 1; everTracked = 0;
-  heightCalibration=null; updateCalibrationLabel();
+  detections = []; tracks = []; nextTrackId = 1; everTracked = 0; resetBatches();
+  lastPeopleSelectKey='';heightCalibration=null; updateCalibrationLabel();
   laneMarkers = {left:null, right:null}; laneLastUpdated = 0;
   $('uniqueVehicles').textContent = '00';
   $('trackingStatus').textContent = 'Menunggu deteksi';
@@ -113,7 +134,7 @@ function updateAnalytics() {
   const activeTracks=tracks.filter(t=>performance.now()-t.seen<1400&&t.score>=confidenceThreshold);
   $('visiblePeople').textContent=String(humans.length).padStart(2,'0');
   $('unknownPeople').textContent=String(activeTracks.filter(t=>t.class==='person'&&!t.personId).length).padStart(2,'0');
-  $('trackingStatus').textContent=filtered.length ? `${activeTracks.length} ID aktif` : 'Tidak ada objek terdeteksi';
+  $('trackingStatus').textContent=filtered.length ? `${activeTracks.length} ID aktif` : ((model||mpObjectDetector||faceDetector||poseDetector)?'Memindai frame…':'Menunggu model AI');
   const distances = vehicles.map(estimateDistance).filter(Number.isFinite);
   $('nearestDistance').textContent = distances.length ? '~'+Math.min(...distances).toFixed(1)+' m*' : '—';
   updateObjectTotals();
@@ -156,8 +177,9 @@ async function prepareVideo(session) {
   beginBadgeLoop(session);
   if (depthEnabled && depthPipe) beginDepthLoop(session);
   loadModel().then(() => {
-    if (cameraSession === session && isActive() && model) detectFrame(session);
-  }).catch(error => console.warn('Vehicle model:', error));
+    if (cameraSession === session && isActive() && model) startObjectLoop(session);
+  }).catch(error => showAiProblem('Object AI',error));
+  loadAuxModels(session).catch(error => showAiProblem('Face/Pose AI',error));
 }
 
 async function startCamera() {
@@ -201,11 +223,11 @@ async function useFile(file) {
 
 function closeSource() {
   cameraSession++;
-  cancelAnimationFrame(animationId); clearTimeout(detectionTimer); clearTimeout(laneTimer); clearTimeout(depthTimer); clearTimeout(badgeTimer);
+  cancelAnimationFrame(animationId); clearTimeout(detectionTimer); clearTimeout(auxTimer); clearTimeout(laneTimer); clearTimeout(depthTimer); clearTimeout(badgeTimer);
   stream?.getTracks().forEach(t=>t.stop()); stream=null;
   video.pause();video.srcObject=null;video.removeAttribute('src');video.load();
   if(fileUrl) URL.revokeObjectURL(fileUrl);fileUrl=null;
-  mediaMode=null;inferenceErrorCount=0;
+  mediaMode=null;inferenceErrorCount=0;objectLoopSession=-1;resetBatches();
   depthValid=false;
   $('depthPlaceholder').hidden=false;
   if(depthEnabled){$('depthBadge').textContent='READY';$('depthStatus').textContent='Depth model siap. Aktifkan kamera atau pilih video.';}
@@ -229,19 +251,187 @@ function injectScript(src) {
   });
 }
 async function loadModel() {
-  if (model) return model;
-  if (modelPromise) return modelPromise;
-  $('aiStatus').textContent='Memuat model…';
+  if(model)return model;
+  if(modelPromise)return modelPromise;
+  setEngineStatus('aiStatus','Memuat model objek…');
   modelPromise=(async()=>{
-    if(!window.tf)await injectScript('https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.22.0/dist/tf.min.js');
-    if(!window.cocoSsd)await injectScript('https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd@2.2.3/dist/coco-ssd.min.js');
-    try{await tf.setBackend('webgl');}catch(_){await tf.setBackend('cpu');}
-    await tf.ready();model=await cocoSsd.load({base:'lite_mobilenet_v2'});
-    $('aiStatus').textContent='Aktif ('+tf.getBackend().toUpperCase()+')';
-    toast('Vehicle AI siap. ID kendaraan akan dilacak selama sesi.');refreshButtons();
-    return model;
+    if(!window.tf){
+      try{await injectScript('https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.22.0/dist/tf.min.js');}
+      catch(_){await injectScript('https://unpkg.com/@tensorflow/tfjs@4.22.0/dist/tf.min.js');}
+    }
+    if(!window.cocoSsd){
+      try{await injectScript('https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd@2.2.3/dist/coco-ssd.min.js');}
+      catch(_){await injectScript('https://unpkg.com/@tensorflow-models/coco-ssd@2.2.3/dist/coco-ssd.min.js');}
+    }
+    if(!window.tf||!window.cocoSsd)throw new Error('Pustaka TensorFlow.js / COCO-SSD tidak tersedia.');
+    try{const ok=await tf.setBackend('webgl');if(!ok)await tf.setBackend('cpu');}
+    catch(_){await tf.setBackend('cpu');}
+    await tf.ready();
+    try{model=await cocoSsd.load({base:'lite_mobilenet_v2'});}
+    catch(first){console.warn('COCO lightweight failed, retry standard',first);model=await cocoSsd.load({base:'mobilenet_v2'});}
+    objectFailed=false;setEngineStatus('aiStatus',`Aktif (${tf.getBackend().toUpperCase()})`);
+    toast('Deteksi kendaraan & tubuh siap.');refreshButtons();return model;
   })();
-  try{return await modelPromise;}catch(error){modelPromise=null;$('aiStatus').textContent='Gagal memuat';toast('Model kendaraan gagal dimuat: '+error.message,true);return null;}
+  try{return await modelPromise;}
+  catch(error){
+    modelPromise=null;objectFailed=true;
+    setEngineStatus('aiStatus','COCO gagal • mencoba fallback…');showAiProblem('Object AI',error);
+    if(mpVision)loadObjectFallback(cameraSession).catch(e=>showAiProblem('Object fallback',e));
+    return null;
+  }
+}
+
+async function loadAuxModels(session){
+  if(auxPromise){
+    await auxPromise;
+    if(cameraSession===session&&isActive()&&(faceDetector||poseDetector||mpObjectDetector))beginAuxLoop(session);
+    return;
+  }
+  auxPromise=(async()=>{
+    setEngineStatus('faceEngineStatus','Memuat library…');
+    setEngineStatus('poseEngineStatus','Menunggu library…');
+    let pkg;
+    try{pkg=await import(`${MP_CDN}/vision_bundle.mjs`);}
+    catch(error){
+      setEngineStatus('faceEngineStatus','Gagal library');setEngineStatus('poseEngineStatus','Gagal library');
+      showAiProblem('MediaPipe CDN',error);return;
+    }
+    let vision;
+    try{vision=await pkg.FilesetResolver.forVisionTasks(`${MP_CDN}/wasm`);}
+    catch(error){
+      setEngineStatus('faceEngineStatus','Gagal WebAssembly');setEngineStatus('poseEngineStatus','Gagal WebAssembly');
+      showAiProblem('MediaPipe WASM',error);return;
+    }
+    mpPkg=pkg;mpVision=vision;
+    if(objectFailed&&!model)loadObjectFallback(session).catch(e=>showAiProblem('Object fallback',e));
+    if(!faceDetector){
+      setEngineStatus('faceEngineStatus','Memuat model wajah…');
+      try{
+        faceDetector=await pkg.FaceDetector.createFromOptions(vision,{
+          baseOptions:{modelAssetPath:FACE_MODEL,delegate:'CPU'},runningMode:'VIDEO',
+          minDetectionConfidence:.35,minSuppressionThreshold:.25
+        });
+        setEngineStatus('faceEngineStatus','Aktif • wajah parsial');
+        if(cameraSession===session&&isActive())beginAuxLoop(session);
+      }catch(error){setEngineStatus('faceEngineStatus','Gagal memuat');showAiProblem('Face AI',error);}
+    }
+    if(!poseDetector){
+      setEngineStatus('poseEngineStatus','Memuat model postur…');
+      try{
+        poseDetector=await pkg.PoseLandmarker.createFromOptions(vision,{
+          baseOptions:{modelAssetPath:POSE_MODEL,delegate:'CPU'},runningMode:'VIDEO',
+          numPoses:3,minPoseDetectionConfidence:.42,minPosePresenceConfidence:.42,
+          minTrackingConfidence:.45,outputSegmentationMasks:false
+        });
+        setEngineStatus('poseEngineStatus','Aktif • postur tubuh');
+        if(cameraSession===session&&isActive())beginAuxLoop(session);
+      }catch(error){setEngineStatus('poseEngineStatus','Gagal memuat');showAiProblem('Pose AI',error);}
+    }
+    refreshButtons();
+  })();
+  try{await auxPromise;}finally{auxPromise=null;}
+  if(cameraSession===session&&isActive()&&(faceDetector||poseDetector||mpObjectDetector))beginAuxLoop(session);
+}
+
+async function loadObjectFallback(session){
+  if(model||mpObjectDetector)return mpObjectDetector;
+  if(mpObjectPromise)return mpObjectPromise;
+  if(!mpPkg||!mpVision)return null;
+  mpObjectPromise=(async()=>{
+    setEngineStatus('aiStatus','Memuat MediaPipe Object AI…');
+    const detector=await mpPkg.ObjectDetector.createFromOptions(mpVision,{
+      baseOptions:{modelAssetPath:'https://storage.googleapis.com/mediapipe-models/object_detector/efficientdet_lite0/float16/1/efficientdet_lite0.tflite',delegate:'CPU'},
+      runningMode:'VIDEO',maxResults:40,scoreThreshold:.22
+    });
+    mpObjectDetector=detector;
+    if(!model)setEngineStatus('aiStatus','Aktif • MediaPipe EfficientDet');
+    if(cameraSession===session&&isActive())beginAuxLoop(session);
+    return detector;
+  })();
+  try{return await mpObjectPromise;}
+  catch(error){setEngineStatus('aiStatus','Gagal kedua model • cek koneksi');showAiProblem('Object fallback',error);return null;}
+  finally{mpObjectPromise=null;}
+}
+function bboxContainsPoint(b,p,margin=.03){
+  const [x,y,w,h]=b;const dw=video.videoWidth*margin,dh=video.videoHeight*margin;
+  return p[0]>=x-dw&&p[0]<=x+w+dw&&p[1]>=y-dh&&p[1]<=y+h+dh;
+}
+function overlapPerson(a,b){
+  const ca=centroid(a.bbox),cb=centroid(b.bbox);
+  return boxIou(a.bbox,b.bbox)>.24 || bboxContainsPoint(a.bbox,cb,.015) || bboxContainsPoint(b.bbox,ca,.015);
+}
+function mergeDetectionBatches(){
+  if(!isActive()||!video.videoWidth)return;
+  const now=performance.now(),valid=(time)=>now-time<1900;
+  const objects=valid(objectBatchAt)?objectBatch:[];
+  const persons=objects.filter(d=>d.class==='person');
+  const vehicles=objects.filter(d=>d.class!=='person');
+  const poses=valid(poseBatchAt)?poseBatch:[];
+  const faces=valid(faceBatchAt)?faceBatch:[];
+  // Fuse detections from multiple models. A face inside a human body counts
+  // as one person, not as a second person.
+  for(const pose of poses){if(!persons.some(p=>overlapPerson(p,pose)))persons.push(pose);}
+  for(const face of faces){
+    const faceCenter=centroid(face.bbox);
+    if(!persons.some(p=>bboxContainsPoint(p.bbox,faceCenter,.01)))persons.push(face);
+  }
+  detections=[...vehicles,...persons];
+  updateTracking(detections.filter(d=>d.score>=confidenceThreshold));
+  inferCount++;
+  const info=`${vehicles.length} kendaraan • ${persons.length} manusia • ${inferCount} analisis`;
+  $('inferenceStat').textContent=info;
+  lastInferenceAt=now;
+  updateAnalytics();refreshButtons();
+}
+function detectFaceBoxes(result){
+  return (result.detections||[]).map(d=>{
+    const b=d.boundingBox||{}, score=d.categories?.[0]?.score||0;
+    return {class:'person',score,bbox:[b.originX||0,b.originY||0,b.width||0,b.height||0],source:'face'};
+  }).filter(d=>d.score>=.30&&d.bbox[2]>14&&d.bbox[3]>14);
+}
+function detectPoseBoxes(result){
+  const vw=video.videoWidth||1,vh=video.videoHeight||1;
+  return (result.landmarks||[]).map(points=>{
+    const good=points.map((p,i)=>({...p,i})).filter(p=>Number.isFinite(p.x)&&Number.isFinite(p.y)&&(p.visibility??1)>.48&&(p.presence??1)>.35);
+    const anchors=good.filter(p=>[11,12,13,14,23,24,25,26].includes(p.i));
+    if(good.length<5||anchors.length<2)return null;
+    const minX=Math.min(...good.map(p=>p.x)),maxX=Math.max(...good.map(p=>p.x));
+    const minY=Math.min(...good.map(p=>p.y)),maxY=Math.max(...good.map(p=>p.y));
+    const dx=Math.max(.06,maxX-minX),dy=Math.max(.1,maxY-minY);
+    const x=clamp(minX-dx*.12,0,1)*vw,y=clamp(minY-dy*.08,0,1)*vh;
+    const w=Math.max(0,Math.min(1,maxX+dx*.12)*vw-x),h=Math.max(0,Math.min(1,maxY+dy*.10)*vh-y);
+    const score=clamp(anchors.reduce((n,p)=>n+(p.visibility??.6),0)/anchors.length,.40,.97);
+    return {class:'person',score,bbox:[x,y,w,h],source:'pose'};
+  }).filter(x=>x&&x.bbox[2]>16&&x.bbox[3]>28);
+}
+function beginAuxLoop(session){
+  clearTimeout(auxTimer);
+  if(!isActive()||cameraSession!==session)return;
+  const tick=()=>{
+    if(!isActive()||cameraSession!==session)return;
+    if(video.readyState>=2){
+      const t=performance.now();
+      try{if(!model&&mpObjectDetector){
+        const result=mpObjectDetector.detectForVideo(video,t);
+        objectBatch=(result.detections||[]).map(d=>{
+          const category=d.categories?.[0]||{}, b=d.boundingBox||{};
+          return {class:String(category.categoryName||category.displayName||'').toLowerCase().trim(),
+            score:category.score||0,bbox:[b.originX||0,b.originY||0,b.width||0,b.height||0],source:'body'};
+        }).filter(d=>CLASSES.includes(d.class));
+        objectBatchAt=performance.now();
+      }}catch(error){showAiProblem('Object fallback inference',error);mpObjectDetector=null;setEngineStatus('aiStatus','Fallback error');}
+      try{if(faceDetector){faceBatch=detectFaceBoxes(faceDetector.detectForVideo(video,performance.now()));faceBatchAt=performance.now();}}
+      catch(error){showAiProblem('Face inference',error);faceDetector=null;setEngineStatus('faceEngineStatus','Error inferensi');}
+      // Run pose less often to reduce CPU pressure on HP.
+      if(poseDetector){
+        try{poseBatch=detectPoseBoxes(poseDetector.detectForVideo(video,performance.now()+1));poseBatchAt=performance.now();}
+        catch(error){showAiProblem('Pose inference',error);poseDetector=null;setEngineStatus('poseEngineStatus','Error inferensi');}
+      }
+      mergeDetectionBatches();
+    }
+    if(isActive()&&cameraSession===session&&(faceDetector||poseDetector||mpObjectDetector))auxTimer=setTimeout(tick,850);
+  };
+  auxTimer=setTimeout(tick,120);
 }
 
 const boxIou=(a,b)=>{
@@ -261,19 +451,25 @@ function updateTracking(objects) {
       const c=centroid(obj.bbox),old=centroid(tr.bbox);
       const dist=Math.hypot((c[0]-old[0])/vw,(c[1]-old[1])/vh);
       const maxDist=.085 + .18*Math.max(obj.bbox[2]/vw,obj.bbox[3]/vh);
-      if(iou<.14 && dist>maxDist)continue;
-      const score=iou*1.5-dist*1.2;
+      let consistentPerson=false;
+      if(tr.class==='person'&&obj.class==='person'){
+        const faceBox=(obj.source==='face')?obj.bbox:(tr.source==='face'?tr.bbox:null);
+        const bodyBox=(obj.source==='face')?tr.bbox:(tr.source==='face'?obj.bbox:null);
+        if(faceBox&&bodyBox)consistentPerson=bboxContainsPoint(bodyBox,centroid(faceBox),.04);
+      }
+      if(iou<.14 && dist>maxDist && !consistentPerson)continue;
+      const score=iou*1.5-dist*1.2+(consistentPerson?1.4:0);
       if(score>best){best=score;selected=tr;}
     }
     if(selected){
-      selected.bbox=obj.bbox.slice();selected.score=obj.score;selected.seen=now;
+      selected.bbox=obj.bbox.slice();selected.score=obj.score;selected.source=obj.source||'body';selected.seen=now;
       selected.history.push(centroid(obj.bbox));
       if(selected.class==='person') syncHeightForTrack(selected);
       if(selected.history.length>20)selected.history.shift();
       matched.add(selected.id);
     }else{
       const id=nextTrackId++;
-      const track={id,class:obj.class,bbox:obj.bbox.slice(),score:obj.score,seen:now,history:[centroid(obj.bbox)],personId:null};
+      const track={id,class:obj.class,bbox:obj.bbox.slice(),score:obj.score,source:obj.source||'body',seen:now,history:[centroid(obj.bbox)],personId:null};
       tracks.push(track); matched.add(id); everTracked++;
       registerNewObject(track);
     }
@@ -288,26 +484,31 @@ function estimateDistance(obj) {
   const focal=video.videoWidth/(2*Math.tan(hfovDeg*Math.PI/360));
   return clamp((OBJECT_WIDTHS_M[obj.class]||1.8)*focal/pxWidth,.3,200);
 }
+function startObjectLoop(session){
+  if(objectLoopSession===session)return;
+  objectLoopSession=session;
+  detectFrame(session);
+}
 async function detectFrame(session) {
   if(!model||!isActive()||session!==cameraSession)return;
   const started=performance.now();
   try {
     if(video.readyState>=2){
-      const results=await model.detect(video,30,Math.min(.3,confidenceThreshold*.65));
+      const results=await model.detect(video,50,Math.max(.15,Math.min(.28,confidenceThreshold*.6)));
       if(session===cameraSession && isActive()){
-        detections=results.filter(d=>CLASSES.includes(d.class));
-        updateTracking(detections.filter(d=>d.score>=confidenceThreshold));
-        updateAnalytics();inferenceErrorCount=0;
+        objectBatch=results.filter(d=>CLASSES.includes(d.class)).map(d=>({...d,source:'body'}));
+        objectBatchAt=performance.now();
+        mergeDetectionBatches();inferenceErrorCount=0;
       }
     }
   }catch(error){
     inferenceErrorCount++;
     console.warn('Vehicle inference:',error);
-    if(inferenceErrorCount===3)toast('Deteksi tersendat. Coba tutup aplikasi lain atau matikan Depth AI.',true);
+    if(inferenceErrorCount===3){showAiProblem('Object inference',error);toast('Deteksi tersendat. Lihat panel SYSTEM STATUS.',true);}
   }
   if(isActive()&&session===cameraSession){
     const elapsed=performance.now()-started;
-    detectionTimer=setTimeout(()=>detectFrame(session),Math.max(90,480-elapsed));
+    detectionTimer=setTimeout(()=>detectFrame(session),Math.max(150,620-elapsed));
   }
 }
 
@@ -430,7 +631,8 @@ function drawTracking(w,h) {
       ctx.beginPath();ctx.moveTo(px+dx*corner,py);ctx.lineTo(px,py);ctx.lineTo(px,py+dy*corner);ctx.stroke();
     }
     const dist=tr.class==='person'?NaN:estimateDistance(tr);
-    const label=`#${String(tr.id).padStart(2,'0')} ${NAMES[tr.class]} ${Math.round(tr.score*100)}%`;
+    const sourceTag=tr.class==='person'?(tr.source==='face'?' • WAJAH':(tr.source==='pose'?' • POSTUR':'')):'';
+    const label=`#${String(tr.id).padStart(2,'0')} ${NAMES[tr.class]}${sourceTag} ${Math.round(tr.score*100)}%`;
     ctx.font=`750 ${font}px system-ui,sans-serif`;
     const labelWidth=ctx.measureText(label).width+15;
     const ly=Math.max(font+10,y);
@@ -470,7 +672,7 @@ function drawHud(w,h){
   const font=Math.max(10,Math.round(w/90)),p=Math.max(8,Math.round(w/70));
   ctx.save();ctx.font=`750 ${font}px ui-monospace,monospace`;
   ctx.fillStyle='#b7fdff';ctx.shadowColor='#000';ctx.shadowBlur=5;
-  ctx.fillText('ZYY / ROAD VISION V3.0',p,p+font);
+  ctx.fillText('ZYY / ROAD VISION V3.1',p,p+font);
   ctx.textAlign='right';ctx.fillText(new Date().toLocaleTimeString('id-ID',{hour12:false}),w-p,p+font);
   ctx.shadowBlur=0;ctx.fillStyle='rgba(3,15,27,.76)';ctx.fillRect(0,h-2*p-font,w,2*p+font);
   ctx.fillStyle='#b6ebf9';ctx.textAlign='left';
@@ -604,7 +806,7 @@ function startRecording(){
       const format=current.mimeType||mime||'video/webm';
       if(recordChunks.length){
         lastRecordingBlob=new Blob(recordChunks,{type:format});
-        lastRecordingFilename=`ZYY-ROAD-VISION-v3_${timestampForFile()}.${format.includes('mp4')?'mp4':'webm'}`;
+        lastRecordingFilename=`ZYY-ROAD-VISION-v3.1_${timestampForFile()}.${format.includes('mp4')?'mp4':'webm'}`;
         if(lastRecordingUrl)URL.revokeObjectURL(lastRecordingUrl);
         lastRecordingUrl=URL.createObjectURL(lastRecordingBlob);
         $('recordNote').textContent=`Rekaman siap (${(lastRecordingBlob.size/1048576).toFixed(1)} MB). Periksa folder Unduhan; klik Simpan Rekaman Terakhir jika perlu.`;
@@ -649,7 +851,7 @@ function takePhoto(){
   canvas.toBlob(blob=>{
     if(!blob){toast('Gagal membuat foto.',true);return;}
     const url=URL.createObjectURL(blob);
-    triggerDownload(url,`ZYY-ROAD-VISION-v3_${timestampForFile()}.png`);
+    triggerDownload(url,`ZYY-ROAD-VISION-v3.1_${timestampForFile()}.png`);
     setTimeout(()=>URL.revokeObjectURL(url),10000);toast('Foto AI disiapkan untuk unduhan.');
   },'image/png');
 }
@@ -676,8 +878,8 @@ function countUniqueLog(){return activeLogEvents().length;}
 function registerNewObject(track){
   const event={id:'OBJ-'+String(nextLogNumber++).padStart(4,'0'),
     trackId:track.id,time:new Date().toISOString(),class:track.class,
-    name:track.class==='person'?'Tidak dikenali':NAMES[track.class],
-    status:track.class==='person'?'Tidak dikenali':'Kendaraan terdeteksi',
+    name:track.class==='person'?'Tidak dikenali':(NAMES[track.class]||track.class),
+    status:track.class==='person'?(`Tidak dikenali • ${track.source==='face'?'wajah':track.source==='pose'?'postur':'tubuh'}`):'Kendaraan terdeteksi',
     heightCm:null,knownKey:null,mergedInto:null};
   track.eventId=event.id;
   eventLog.push(event);
@@ -771,7 +973,7 @@ function assignZyyToTrack(track,method='manual'){
   if(method==='manual')toast(`Person #${track.id} ditandai Zyy (manual).`);
 }
 function estimatePersonHeight(track){
-  if(!track||track.class!=='person'||!heightCalibration||!video.videoHeight)return NaN;
+  if(!track||track.class!=='person'||track.source!=='body'||!heightCalibration||!video.videoHeight)return NaN;
   const box=track.bbox,foot=box[1]+box[3],vh=video.videoHeight;
   // Refuse estimates if feet/head are clipped, or perspective differs too much.
   if(box[1]<vh*.014 || foot>vh*.982 || box[3]<vh*.13)return NaN;
@@ -796,7 +998,7 @@ function calibrateHeight(){
   if(!tr){toast('Pilih person yang terlihat utuh terlebih dahulu.',true);return;}
   if(!Number.isFinite(cm)||cm<80||cm>230){toast('Masukkan tinggi acuan 80–230 cm yang benar-benar diketahui.',true);return;}
   const [x,y,w,h]=tr.bbox,vh=video.videoHeight;
-  if(!vh||y<vh*.014||y+h>vh*.982||h<vh*.13){toast('Pastikan kepala sampai kaki masuk seluruh frame untuk kalibrasi.',true);return;}
+  if(tr.source!=='body'||!vh||y<vh*.014||y+h>vh*.982||h<vh*.13){toast('Kalibrasi hanya tersedia jika AI mendeteksi tubuh utuh (bukan wajah/postur parsial).',true);return;}
   heightCalibration={trackId:tr.id,heightCm:cm,pixelHeight:h,footY:(y+h)/vh};
   updateCalibrationLabel();
   for(const person of tracks.filter(t=>t.class==='person'))syncHeightForTrack(person);
@@ -866,6 +1068,15 @@ function beginBadgeLoop(session){
   });
 }
 
+$('retryAiBtn').addEventListener('click',async()=>{
+  if(!isActive()){toast('Aktifkan kamera atau Uji Video dahulu.');return;}
+  const session=cameraSession;
+  $('aiErrorDetails').hidden=true;lastAiError='';
+  if(!model){await loadModel();if(isActive()&&cameraSession===session&&model)startObjectLoop(session);}
+  if(!faceDetector||!poseDetector)await loadAuxModels(session);
+  if(!model&&objectFailed)await loadObjectFallback(session);
+  toast('Percobaan muat ulang AI selesai. Periksa status model di bawah.');
+});
 $('knownTrack').addEventListener('change',refreshPersonSelector);
 $('assignZyyBtn').addEventListener('click',()=>assignZyyToTrack(getSelectedPersonTrack(),'manual'));
 $('calibrateBtn').addEventListener('click',calibrateHeight);
@@ -891,7 +1102,7 @@ $('laneSwitch').addEventListener('change',e=>{showLane=e.target.checked;refreshB
 $('trailSwitch').addEventListener('change',e=>{showTrail=e.target.checked;});
 $('depthOverlaySwitch').addEventListener('change',e=>{showDepthOverlay=e.target.checked;});
 window.addEventListener('pagehide',()=>{
-  clearInterval(recordingTimer);clearTimeout(detectionTimer);clearTimeout(laneTimer);clearTimeout(depthTimer);clearTimeout(badgeTimer);
+  clearInterval(recordingTimer);clearTimeout(detectionTimer);clearTimeout(auxTimer);clearTimeout(laneTimer);clearTimeout(depthTimer);clearTimeout(badgeTimer);
   try{if(recorder?.state==='recording')recorder.stop();}catch(_){/*noop*/}
   stream?.getTracks().forEach(t=>t.stop());
   if(fileUrl)URL.revokeObjectURL(fileUrl);

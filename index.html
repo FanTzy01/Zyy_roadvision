@@ -4,8 +4,8 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
   <meta name="theme-color" content="#06111f" />
-  <meta name="description" content="ZYY-ROAD VISION v3.0 — AI vehicle detection, object tracking, lane detection, relative depth map, and local recording." />
-  <title>ZYY-ROAD VISION v3.0 | Advanced Road Intelligence</title>
+  <meta name="description" content="ZYY-ROAD VISION v3.1 — AI vehicle detection, object tracking, lane detection, relative depth map, and local recording." />
+  <title>ZYY-ROAD VISION v3.1 | Advanced Road Intelligence</title>
   <link rel="stylesheet" href="./style.css" />
 </head>
 <body>
@@ -14,12 +14,12 @@
     <header class="topbar">
       <div class="brand">
         <div class="brand-logo" aria-hidden="true">Z<span class="logo-pulse"></span></div>
-        <div><div class="brand-name">ZYY<span class="dash">/</span>ROAD VISION <span class="version">V3.0</span></div><div class="brand-sub">ROAD + HUMAN INTELLIGENCE</div></div>
+        <div><div class="brand-name">ZYY<span class="dash">/</span>ROAD VISION <span class="version">V3.1</span></div><div class="brand-sub">ROAD + HUMAN INTELLIGENCE</div></div>
       </div>
       <div class="top-status"><span class="state-dot" id="stateDot"></span><span id="headerStatus">STANDBY</span><span class="status-spacer"></span><span class="local-tag">LOCAL AI</span></div>
     </header>
 
-    <div class="hero-heading"><div><p class="eyebrow"><span class="line"></span> COMPUTER VISION COMMAND CENTER</p><h1>Pantau objek. <span>Catat tanpa hitung berulang.</span></h1><p class="subtitle">Deteksi kendaraan dan manusia, identitas berbasis badge/manual, daftar objek unik, analisis marka, dan peta kedalaman relatif. Diproses pada browser HP.</p></div><div class="hero-mark">Z<span>RV</span></div></div>
+    <div class="hero-heading"><div><p class="eyebrow"><span class="line"></span> COMPUTER VISION COMMAND CENTER</p><h1>Pantau objek. <span>Catat tanpa hitung berulang.</span></h1><p class="subtitle">Deteksi kendaraan + manusia melalui tubuh, wajah atau postur; identitas berbasis badge/manual, daftar objek unik, analisis marka, dan peta kedalaman relatif. Diproses pada browser HP.</p></div><div class="hero-mark">Z<span>RV</span></div></div>
 
     <div class="feature-strip" aria-label="Fitur versi 2">
       <span><i class="feature-indicator"></i> PEOPLE + VEHICLE TRACKING</span><span><i class="feature-indicator"></i> LANE ANALYSIS</span><span><i class="feature-indicator"></i> UNIQUE EVENT LOG</span><span><i class="feature-indicator"></i> MONOCULAR DEPTH</span>
@@ -34,14 +34,16 @@
           <div class="empty-viewport" id="emptyViewport">
             <div class="radar"><div class="radar-sweep"></div><span class="radar-center">⌖</span></div>
             <h2>ROAD SENSOR OFFLINE</h2>
-            <p>Aktifkan kamera HP untuk mendeteksi kendaraan dan manusia secara langsung, atau pilih rekaman untuk menguji analisis.</p>
+            <p>Aktifkan kamera HP untuk mendeteksi kendaraan, wajah, dan postur manusia secara langsung, atau pilih rekaman untuk menguji analisis.</p>
             <button class="btn btn-primary" id="activateBtn" type="button">◉ &nbsp; AKTIFKAN KAMERA</button>
-            <span class="empty-note">Kamera membutuhkan HTTPS atau localhost.</span>
+            <span class="empty-note">Kamera membutuhkan HTTPS atau localhost. Tunggu sampai status Object AI atau Face AI menunjukkan Aktif.</span>
           </div>
           <div class="rec-indicator" id="recIndicator" hidden><span class="rec-dot"></span> REC <span id="recTime">00:00</span></div>
           <div class="camera-floating" id="cameraFloating" hidden>◉ AI SENSOR ONLINE</div>
           <div class="lane-floating" id="laneFloating" hidden>LANE: <b id="laneFloatingText">SCANNING</b></div>
         </div>
+        <div class="ai-debug-bar" aria-live="polite"><span id="inferenceStat">0 kendaraan • 0 manusia • menunggu AI</span><button id="retryAiBtn" class="btn btn-outline" type="button">⟳ Muat Ulang AI</button></div>
+        <div id="aiErrorDetails" class="ai-error-box" hidden></div>
         <div class="camera-footer"><span id="cameraHint">Siap • Semua analisis berjalan di perangkat</span><span id="dimensionLabel">— × —</span></div>
         <div class="toolbar">
           <button id="startBtn" class="btn btn-primary" type="button">◉ Mulai Kamera</button>
@@ -67,7 +69,7 @@
         </section>
 
 
-        <section class="side-card people-card" aria-label="Deteksi manusia dan registrasi identitas">
+        <section class="side-card people-card" aria-label="Deteksi manusia melalui tubuh / wajah / postur dan registrasi identitas">
           <div class="section-heading"><span class="section-glyph">♙</span><h2>HUMAN INTELLIGENCE</h2><span class="tiny-label">PEOPLE AI</span></div>
           <div class="people-stats">
             <div><strong id="visiblePeople">00</strong><span>MANUSIA DI FRAME</span></div>
@@ -131,8 +133,8 @@
 
         <section class="side-card" aria-label="Pengaturan AI">
           <div class="section-heading"><span class="section-glyph">⚙</span><h2>AI SETTINGS</h2><span class="tiny-label">LOCAL</span></div>
-          <div class="setting-line"><label for="confidence">Batas keyakinan deteksi</label><strong id="confidenceValue">55%</strong></div>
-          <input id="confidence" type="range" min="30" max="90" step="5" value="55" />
+          <div class="setting-line"><label for="confidence">Batas keyakinan deteksi</label><strong id="confidenceValue">35%</strong></div>
+          <input id="confidence" type="range" min="20" max="90" step="5" value="35" />
           <div class="setting-line setting-spaced"><label for="cameraFov">Asumsi sudut pandang kamera (HFOV)</label><strong id="fovValue">68°</strong></div>
           <input id="cameraFov" type="range" min="45" max="100" step="1" value="68" />
           <div class="setting-explainer">HFOV adalah asumsi, bukan kalibrasi kamera. Mengubahnya memengaruhi perkiraan jarak.</div>
@@ -143,7 +145,9 @@
 
         <section class="side-card system-card">
           <div class="section-heading"><span class="section-glyph">⌘</span><h2>SYSTEM STATUS</h2></div>
-          <div class="sys-row"><span>Object AI</span><strong id="aiStatus">Belum dimuat</strong></div>
+          <div class="sys-row"><span>Object AI (kendaraan/tubuh)</span><strong id="aiStatus">Belum dimuat</strong></div>
+          <div class="sys-row"><span>Face AI (wajah saja)</span><strong id="faceEngineStatus">Belum dimuat</strong></div>
+          <div class="sys-row"><span>Pose AI (postur sebagian)</span><strong id="poseEngineStatus">Belum dimuat</strong></div>
           <div class="sys-row"><span>Input video</span><strong id="cameraStatus">Offline</strong></div>
           <div class="sys-row"><span>Lane engine</span><strong id="laneEngineStatus">Standby</strong></div>
           <div class="sys-row"><span>Depth engine</span><strong id="depthEngineStatus">Standby</strong></div>
@@ -152,7 +156,7 @@
         </section>
       </aside>
     </main>
-    <footer><span>ZYY SYSTEMS © 2026 • EXPERIMENTAL COMPUTER VISION • LOCAL EVENT LOG</span><span>BUILD 3.0 / PEOPLE + ROAD</span></footer>
+    <footer><span>ZYY SYSTEMS © 2026 • EXPERIMENTAL COMPUTER VISION • LOCAL EVENT LOG</span><span>BUILD 3.1 / PEOPLE + ROAD</span></footer>
   </div>
   <div class="toast" id="toast" role="status" aria-live="polite"></div>
   <script src="./app.js" defer></script>
