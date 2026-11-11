@@ -3,9 +3,9 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-  <meta name="theme-color" content="#081321" />
-  <meta name="description" content="ZYY-ROAD VISION — deteksi kendaraan langsung dari kamera dan rekam hasilnya di perangkat." />
-  <title>ZYY-ROAD VISION | AI Vehicle Detection</title>
+  <meta name="theme-color" content="#06111f" />
+  <meta name="description" content="ZYY-ROAD VISION v2.0 — AI vehicle detection, object tracking, lane detection, relative depth map, and local recording." />
+  <title>ZYY-ROAD VISION v2.0 | Advanced Road Intelligence</title>
   <link rel="stylesheet" href="./style.css" />
 </head>
 <body>
@@ -13,74 +13,106 @@
   <div class="shell">
     <header class="topbar">
       <div class="brand">
-        <div class="brand-logo" aria-hidden="true"><span>Z</span><span class="logo-pulse"></span></div>
-        <div><div class="brand-name">ZYY<span class="dash">/</span>ROAD VISION <span class="version">V1.0</span></div><div class="brand-sub">AI VEHICLE DETECTION SYSTEM</div></div>
+        <div class="brand-logo" aria-hidden="true">Z<span class="logo-pulse"></span></div>
+        <div><div class="brand-name">ZYY<span class="dash">/</span>ROAD VISION <span class="version">V2.0</span></div><div class="brand-sub">ADVANCED ROAD INTELLIGENCE</div></div>
       </div>
-      <div class="top-status"><span class="state-dot" id="stateDot"></span><span id="headerStatus">STANDBY</span><span class="status-spacer"></span><span class="local-tag">ON-DEVICE AI</span></div>
+      <div class="top-status"><span class="state-dot" id="stateDot"></span><span id="headerStatus">STANDBY</span><span class="status-spacer"></span><span class="local-tag">LOCAL AI</span></div>
     </header>
 
-    <div class="hero-heading"><div><p class="eyebrow"><span class="line"></span> SMART CAMERA SYSTEM</p><h1>Pantau jalan. <span>Deteksi secara real-time.</span></h1><p class="subtitle">Kamera HP + deteksi kendaraan AI + rekaman langsung ke perangkat. Tidak perlu mengunggah video ke server.</p></div><div class="hero-mark">Z<span>R</span>V</div></div>
+    <div class="hero-heading"><div><p class="eyebrow"><span class="line"></span> COMPUTER VISION COMMAND CENTER</p><h1>Kenali kendaraan. <span>Baca kondisi jalan.</span></h1><p class="subtitle">Pelacakan ID kendaraan, analisis garis marka jalan, jarak perkiraan, dan AI Depth Map — diproses pada browser HP.</p></div><div class="hero-mark">Z<span>RV</span></div></div>
+
+    <div class="feature-strip" aria-label="Fitur versi 2">
+      <span><i class="feature-indicator"></i> VEHICLE TRACKING</span><span><i class="feature-indicator"></i> LANE ANALYSIS</span><span><i class="feature-indicator"></i> DISTANCE ESTIMATE</span><span><i class="feature-indicator"></i> MONOCULAR DEPTH</span>
+    </div>
 
     <main class="layout">
       <section class="camera-card" aria-label="Tampilan kamera">
         <div class="panel-top"><div class="panel-title"><span class="corner-icon">⌗</span> LIVE VISION <small id="cameraLabel">CAMERA OFFLINE</small></div><div class="fps-label" id="fpsLabel">— FPS</div></div>
         <div class="viewport" id="viewport">
           <video id="camera" autoplay muted playsinline aria-hidden="true"></video>
-          <canvas id="display" aria-label="Video kamera dengan kotak deteksi kendaraan"></canvas>
+          <canvas id="display" aria-label="Video kamera beserta deteksi, lintasan kendaraan, dan jalur terdeteksi"></canvas>
           <div class="empty-viewport" id="emptyViewport">
             <div class="radar"><div class="radar-sweep"></div><span class="radar-center">⌖</span></div>
-            <h2>CAMERA NOT INITIALIZED</h2>
-            <p>Aktifkan kamera untuk memulai analisis kendaraan di sekitar.</p>
+            <h2>ROAD SENSOR OFFLINE</h2>
+            <p>Aktifkan kamera HP untuk mendeteksi lalu lintas secara langsung, atau pilih rekaman untuk menguji analisis.</p>
             <button class="btn btn-primary" id="activateBtn" type="button">◉ &nbsp; AKTIFKAN KAMERA</button>
-            <div class="empty-note">Izinkan akses kamera ketika diminta oleh browser.</div>
+            <span class="empty-note">Kamera membutuhkan HTTPS atau localhost.</span>
           </div>
-          <div class="rec-indicator" id="recIndicator" hidden><span class="rec-dot"></span>REC <span id="recTime">00:00</span></div>
-          <div class="camera-floating" id="cameraFloating" hidden>◉ AI ACTIVE <span class="sep">/</span> DETECTING</div>
+          <div class="rec-indicator" id="recIndicator" hidden><span class="rec-dot"></span> REC <span id="recTime">00:00</span></div>
+          <div class="camera-floating" id="cameraFloating" hidden>◉ AI SENSOR ONLINE</div>
+          <div class="lane-floating" id="laneFloating" hidden>LANE: <b id="laneFloatingText">SCANNING</b></div>
         </div>
-        <div class="camera-footer"><span id="cameraHint">Siap untuk memulai • Gunakan HTTPS atau localhost</span><span id="dimensionLabel">— × —</span></div>
+        <div class="camera-footer"><span id="cameraHint">Siap • Semua analisis berjalan di perangkat</span><span id="dimensionLabel">— × —</span></div>
         <div class="toolbar">
-          <button id="startBtn" class="btn btn-primary" type="button"><span>◉</span> Mulai Kamera</button>
-          <button id="stopBtn" class="btn btn-outline" type="button" disabled><span>◼</span> Matikan</button>
-          <button id="flipBtn" class="btn btn-outline" type="button" disabled><span>⇄</span> Ganti Kamera</button>
-          <button id="shotBtn" class="btn btn-outline" type="button" disabled><span>▣</span> Foto</button>
+          <button id="startBtn" class="btn btn-primary" type="button">◉ Mulai Kamera</button>
+          <button id="uploadBtn" class="btn btn-outline" type="button">▣ Uji Video</button>
+          <input type="file" id="videoInput" accept="video/*" hidden />
+          <button id="stopBtn" class="btn btn-outline" type="button" disabled>■ Matikan</button>
+          <button id="flipBtn" class="btn btn-outline" type="button" disabled>⇄ Ganti Kamera</button>
+          <button id="shotBtn" class="btn btn-outline" type="button" disabled>▧ Foto</button>
         </div>
-        <div class="disclaimer"><span>ⓘ</span> Ini prototipe analisis visual, bukan sistem keselamatan berkendara. Jangan mengoperasikan HP saat menyetir.</div>
+        <div class="disclaimer">ⓘ Analisis hanya dari bidang pandang kamera, tidak mendeteksi 360°. Jangan mengoperasikan HP saat mengemudi. Bukan perangkat keselamatan berkendara.</div>
       </section>
 
       <aside class="sidebar">
-        <section class="side-card">
-          <div class="section-heading"><span class="section-glyph">▦</span><h2>LIVE ANALYTICS</h2><span class="tiny-label">REAL TIME</span></div>
-          <div class="stat-primary"><div class="stat-number" id="totalVehicles">00</div><div class="stat-copy"><strong>KENDARAAN</strong><span>Terlihat pada frame terbaru</span></div><span class="stat-chart">▂▅▃▇▆▅</span></div>
+        <section class="side-card" aria-label="Analisis kendaraan">
+          <div class="section-heading"><span class="section-glyph">▦</span><h2>VEHICLE ANALYTICS</h2><span class="tiny-label">LIVE</span></div>
+          <div class="stat-grid">
+            <div class="stat-primary"><div class="stat-number" id="totalVehicles">00</div><div class="stat-copy"><strong>TERLIHAT</strong><span>Dalam frame terbaru</span></div></div>
+            <div class="stat-secondary"><div class="stat-number" id="uniqueVehicles">00</div><div class="stat-copy"><strong>ID DILACAK</strong><span>Selama sesi ini*</span></div></div>
+          </div>
           <div class="vehicle-stats"><div><span>Mobil</span><strong id="countCar">0</strong></div><div><span>Motor</span><strong id="countMotorcycle">0</strong></div><div><span>Bus</span><strong id="countBus">0</strong></div><div><span>Truk</span><strong id="countTruck">0</strong></div><div><span>Sepeda</span><strong id="countBicycle">0</strong></div></div>
+          <div class="mini-status"><span>TRACKING STATUS</span><strong id="trackingStatus">Menunggu kamera</strong></div>
+          <p class="side-desc small">*ID adalah perkiraan, bukan hitungan pasti kendaraan yang melintas. ID dapat berubah setelah kendaraan terhalang.</p>
         </section>
 
-        <section class="side-card">
+        <section class="side-card" aria-label="Analisis jalur dan jarak">
+          <div class="section-heading"><span class="section-glyph">≋</span><h2>ROAD ANALYSIS</h2><span class="tiny-label">VISION</span></div>
+          <div class="road-stats"><div><span>MARKA KIRI</span><strong id="leftLaneStatus">—</strong></div><div><span>MARKA KANAN</span><strong id="rightLaneStatus">—</strong></div><div><span>OBJEK TERDEKAT*</span><strong id="nearestDistance">—</strong></div></div>
+          <div class="mini-status"><span>Jalur terdeteksi</span><strong id="laneStatus">Belum dianalisis</strong></div>
+          <p class="side-desc small">Deteksi garis berbasis tepi gambar; hanya berlaku jika marka terlihat jelas. *Jarak sangat kasar berdasarkan ukuran objek dan asumsi kamera, bukan sensor jarak.</p>
+        </section>
+
+        <section class="side-card" aria-label="Depth Map AI">
+          <div class="section-heading"><span class="section-glyph">◈</span><h2>AI DEPTH MAP</h2><span id="depthBadge" class="tiny-label">OPTIONAL</span></div>
+          <div class="depth-panel"><canvas id="depthCanvas" width="480" height="270" aria-label="Peta kedalaman relatif"></canvas><div class="depth-placeholder" id="depthPlaceholder"><span>◈</span><strong>MONOCULAR DEPTH AI</strong><small>Aktifkan model kedalaman jika perangkat mendukung</small></div><span class="depth-overlay-caption" id="depthOverlayCaption">RELATIVE DEPTH • NOT METERS</span></div>
+          <div class="depth-legend"><span>JAUH / RELATIF</span><div class="depth-gradient"></div><span>DEKAT / RELATIF</span></div>
+          <button id="depthBtn" class="btn btn-secondary" type="button">◈ Aktifkan Depth AI</button>
+          <p class="side-desc small" id="depthStatus">Model tambahan diunduh saat diaktifkan (~27 MB bobot model + runtime). Proses dapat berat untuk HP kelas bawah.</p>
+        </section>
+
+        <section class="side-card" aria-label="Perekaman video">
           <div class="section-heading"><span class="section-glyph">●</span><h2>VIDEO RECORDER</h2><span id="recBadge" class="tiny-label">READY</span></div>
-          <p class="side-desc">Rekam video kamera beserta kotak deteksi, kemudian simpan sebagai file lokal.</p>
           <div class="rec-dial"><span>●</span><div><strong id="recordDisplay">00:00</strong><small id="recordSub">Belum merekam</small></div></div>
           <button id="recordBtn" class="btn btn-rec" type="button" disabled>● &nbsp; Mulai Rekam</button>
           <button id="downloadBtn" class="btn btn-secondary" type="button" disabled>↓ &nbsp; Simpan Rekaman Terakhir</button>
-          <p class="record-note" id="recordNote">Rekaman tanpa suara • maksimal 5 menit per klip • format mengikuti dukungan browser.</p>
+          <p class="record-note" id="recordNote">Video memuat overlay AI & inset Depth Map (jika aktif); maksimal 5 menit tanpa audio.</p>
         </section>
 
-        <section class="side-card">
+        <section class="side-card" aria-label="Pengaturan AI">
           <div class="section-heading"><span class="section-glyph">⚙</span><h2>AI SETTINGS</h2><span class="tiny-label">LOCAL</span></div>
           <div class="setting-line"><label for="confidence">Batas keyakinan deteksi</label><strong id="confidenceValue">55%</strong></div>
           <input id="confidence" type="range" min="30" max="90" step="5" value="55" />
-          <div class="setting-explainer">Naikkan nilai untuk mengurangi deteksi yang keliru.</div>
-          <label class="switch-line"><span><strong>Garis pandu jalan</strong><small>Ilustrasi saja, bukan deteksi lajur</small></span><input id="guideSwitch" type="checkbox" checked /><span class="switch-ui"></span></label>
+          <div class="setting-line setting-spaced"><label for="cameraFov">Asumsi sudut pandang kamera (HFOV)</label><strong id="fovValue">68°</strong></div>
+          <input id="cameraFov" type="range" min="45" max="100" step="1" value="68" />
+          <div class="setting-explainer">HFOV adalah asumsi, bukan kalibrasi kamera. Mengubahnya memengaruhi perkiraan jarak.</div>
+          <label class="switch-line"><span><strong>Tampilkan jalur terdeteksi</strong><small>Garis hanya muncul jika ada bukti marka</small></span><input id="laneSwitch" type="checkbox" checked /><span class="switch-ui"></span></label>
+          <label class="switch-line"><span><strong>Jejak kendaraan</strong><small>Lintasan gerak relatif dalam gambar</small></span><input id="trailSwitch" type="checkbox" checked /><span class="switch-ui"></span></label>
+          <label class="switch-line"><span><strong>Depth Map pada rekaman</strong><small>Inset pada sudut video saat Depth AI siap</small></span><input id="depthOverlaySwitch" type="checkbox" checked /><span class="switch-ui"></span></label>
         </section>
 
         <section class="side-card system-card">
           <div class="section-heading"><span class="section-glyph">⌘</span><h2>SYSTEM STATUS</h2></div>
-          <div class="sys-row"><span>Engine AI</span><strong id="aiStatus">Belum dimuat</strong></div>
-          <div class="sys-row"><span>Kamera</span><strong id="cameraStatus">Offline</strong></div>
-          <div class="sys-row"><span>Pemrosesan</span><strong>Di perangkat</strong></div>
-          <div class="sys-row"><span>Unggah ke server</span><strong>Tidak</strong></div>
+          <div class="sys-row"><span>Vehicle AI</span><strong id="aiStatus">Belum dimuat</strong></div>
+          <div class="sys-row"><span>Input video</span><strong id="cameraStatus">Offline</strong></div>
+          <div class="sys-row"><span>Lane engine</span><strong id="laneEngineStatus">Standby</strong></div>
+          <div class="sys-row"><span>Depth engine</span><strong id="depthEngineStatus">Standby</strong></div>
+          <div class="sys-row"><span>Pemrosesan</span><strong>Di browser</strong></div>
+          <div class="sys-row"><span>Upload rekaman</span><strong>Tidak ada</strong></div>
         </section>
       </aside>
     </main>
-    <footer><span>ZYY SYSTEMS <b>© 2026</b> • ZYY-ROAD VISION EXPERIMENTAL</span><span>BUILD 1.0 / COMPUTER VISION</span></footer>
+    <footer><span>ZYY SYSTEMS © 2026 • EXPERIMENTAL COMPUTER VISION</span><span>BUILD 2.0 / ROAD INTELLIGENCE</span></footer>
   </div>
   <div class="toast" id="toast" role="status" aria-live="polite"></div>
   <script src="./app.js" defer></script>

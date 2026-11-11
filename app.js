@@ -1,50 +1,51 @@
-/* ZYY-ROAD VISION v1.0 — seluruh analisis AI dan perekaman berjalan di browser. */
+/* ZYY-ROAD VISION v2.0 — browser-only computer vision prototype.
+ * Distance is an uncalibrated pinhole-camera estimate; depth is relative.
+ * Do not use any output for collision avoidance or driving decisions.
+ */
 'use strict';
 
 const $ = id => document.getElementById(id);
 const video = $('camera');
 const canvas = $('display');
-const ctx = canvas.getContext('2d', { alpha: false, desynchronized: true });
+const ctx = canvas.getContext('2d', { alpha: false });
+const depthCanvas = $('depthCanvas');
+const dctx = depthCanvas.getContext('2d', { alpha: false });
+const laneInput = document.createElement('canvas');
+const laneInputCtx = laneInput.getContext('2d', { willReadFrequently: true });
+const depthInput = document.createElement('canvas');
+const depthInputCtx = depthInput.getContext('2d');
 const CLASSES = ['car', 'motorcycle', 'bus', 'truck', 'bicycle'];
 const NAMES = { car: 'MOBIL', motorcycle: 'MOTOR', bus: 'BUS', truck: 'TRUK', bicycle: 'SEPEDA' };
-const COLORS = { car: '#15e6fb', motorcycle: '#ffd36d', bus: '#73ffbb', truck: '#f7a1ff', bicycle: '#8ab5ff' };
+const COLORS = { car: '#13e9ff', motorcycle: '#ffc971', bus: '#7cffb4', truck: '#f4a6ff', bicycle: '#89baff' };
 const COUNTERS = { car: 'countCar', motorcycle: 'countMotorcycle', bus: 'countBus', truck: 'countTruck', bicycle: 'countBicycle' };
+const OBJECT_WIDTHS_M = { car: 1.8, motorcycle: .75, bus: 2.5, truck: 2.5, bicycle: .6 };
 const MAX_RECORD_MS = 5 * 60 * 1000;
 
-let stream = null;
-let model = null;
-let modelPromise = null;
-let cameraActive = false;
-let cameraBusy = false;
-let facingMode = 'environment';
-let detections = [];
-let cameraSession = 0;
-let animationId = null;
-let detectionTimer = null;
-let lastRafTime = 0;
-let displayedFps = 0;
-let recorder = null;
-let recorderStream = null;
-let recording = false;
-let recordChunks = [];
-let recordStartedAt = 0;
-let recordingTimer = null;
-let lastRecordingBlob = null;
-let lastRecordingFilename = '';
-let lastRecordingUrl = null;
+let stream = null, mediaMode = null, fileUrl = null, facingMode = 'environment';
+let model = null, modelPromise = null, cameraBusy = false, cameraSession = 0;
+let animationId = null, detectionTimer = null, laneTimer = null, depthTimer = null;
+let lastRafTime = 0, displayedFps = 0, inferenceErrorCount = 0;
+let detections = [], tracks = [], nextTrackId = 1, everTracked = 0;
+let laneMarkers = { left: null, right: null }, laneLastUpdated = 0;
+let confidenceThreshold = .55, hfovDeg = 68;
+let showLane = true, showTrail = true, showDepthOverlay = true;
+let depthEnabled = false, depthLoading = false, depthPipe = null, depthRawImage = null, depthValid = false;
+let depthGeneration = 0, depthBusy = false;
+let recorder = null, recorderStream = null, recording = false, recordChunks = [];
+let recordStartedAt = 0, recordingTimer = null;
+let lastRecordingBlob = null, lastRecordingFilename = '', lastRecordingUrl = null;
 let toastTimeout = null;
-let showGuide = true;
-let confidenceThreshold = 0.55;
 
 const isSecureCameraContext = () => window.isSecureContext && !!navigator.mediaDevices?.getUserMedia;
+const isActive = () => mediaMode !== null;
+const clamp = (x, lo, hi) => Math.max(lo, Math.min(hi, x));
 const timestampForFile = () => {
-  const d = new Date();
-  const p = n => String(n).padStart(2, '0');
-  return `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}_${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`;
+  const d = new Date(), p = n => String(n).padStart(2, '0');
+  return `${d.getFullYear()}${p(d.getMonth()+1)}${p(d.getDate())}_${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`;
 };
-const fmtDuration = seconds => {
-  const n = Math.max(0, Math.floor(seconds));
-  return `${String(Math.floor(n / 60)).padStart(2, '0')}:${String(n % 60).padStart(2, '0')}`;
+const fmtDuration = ms => {
+  const seconds = Math.floor(Math.max(0, ms) / 1000);
+  return `${String(Math.floor(seconds / 60)).padStart(2,'0')}:${String(seconds % 60).padStart(2,'0')}`;
 };
 
 function toast(message, error = false) {
@@ -57,399 +58,592 @@ function toast(message, error = false) {
 }
 
 function refreshButtons() {
-  $('startBtn').disabled = cameraActive || cameraBusy;
+  const active = isActive();
+  $('startBtn').disabled = active || cameraBusy;
   $('activateBtn').disabled = cameraBusy;
-  $('stopBtn').disabled = !cameraActive || recording;
-  $('flipBtn').disabled = !cameraActive || recording || cameraBusy;
-  $('shotBtn').disabled = !cameraActive;
-  $('recordBtn').disabled = !cameraActive || cameraBusy || (!recording && (!window.MediaRecorder || !canvas.captureStream));
+  $('uploadBtn').disabled = active || cameraBusy;
+  $('stopBtn').disabled = !active || cameraBusy || recording;
+  $('flipBtn').disabled = mediaMode !== 'camera' || cameraBusy || recording;
+  $('shotBtn').disabled = !active;
+  $('recordBtn').disabled = !active || cameraBusy || (!recording && (!window.MediaRecorder || !canvas.captureStream));
   $('recordBtn').classList.toggle('recording', recording);
   $('recordBtn').innerHTML = recording ? '■ &nbsp; Hentikan Rekaman' : '● &nbsp; Mulai Rekam';
   $('recBadge').textContent = recording ? 'RECORDING' : 'READY';
   $('recIndicator').hidden = !recording;
   $('downloadBtn').disabled = !lastRecordingBlob;
-  $('stateDot').classList.toggle('live', cameraActive);
-  $('headerStatus').textContent = cameraActive ? (model ? 'AI ONLINE' : 'CAMERA ONLINE') : 'STANDBY';
-  $('cameraLabel').textContent = cameraActive ? (facingMode === 'environment' ? 'REAR CAMERA' : 'FRONT CAMERA') : 'CAMERA OFFLINE';
-  $('cameraStatus').textContent = cameraActive ? 'Online' : 'Offline';
-  $('cameraFloating').hidden = !cameraActive || !model;
+  $('stateDot').classList.toggle('live', active);
+  $('headerStatus').textContent = active ? (model ? 'AI ONLINE' : 'VIDEO ONLINE') : 'STANDBY';
+  $('cameraLabel').textContent = !active ? 'CAMERA OFFLINE' : (mediaMode === 'file' ? 'LOCAL VIDEO' : (facingMode === 'environment' ? 'REAR CAMERA' : 'FRONT CAMERA'));
+  $('cameraStatus').textContent = !active ? 'Offline' : (mediaMode === 'file' ? 'Video lokal' : 'Kamera aktif');
+  $('cameraFloating').hidden = !active || !model;
+  $('laneFloating').hidden = !active || !showLane;
+  $('depthBtn').disabled = depthLoading;
+  $('depthBtn').textContent = depthLoading ? '◈ Memuat model Depth…' : (depthEnabled ? '■ Nonaktifkan Depth AI' : '◈ Aktifkan Depth AI');
 }
-function clearAnalytics() {
-  detections = [];
-  $('totalVehicles').textContent = '00';
-  for (const id of Object.values(COUNTERS)) $(id).textContent = '0';
+
+function resetSessionAnalytics() {
+  detections = []; tracks = []; nextTrackId = 1; everTracked = 0;
+  laneMarkers = {left:null, right:null}; laneLastUpdated = 0;
+  $('uniqueVehicles').textContent = '00';
+  $('trackingStatus').textContent = 'Menunggu deteksi';
+  $('leftLaneStatus').textContent = '—';
+  $('rightLaneStatus').textContent = '—';
+  $('nearestDistance').textContent = '—';
+  $('laneStatus').textContent = 'Memindai marka jalan…';
+  $('laneFloatingText').textContent = 'SCANNING';
+  updateAnalytics();
 }
+
 function updateAnalytics() {
   const filtered = detections.filter(d => d.score >= confidenceThreshold);
-  $('totalVehicles').textContent = String(filtered.length).padStart(2, '0');
-  for (const [type, id] of Object.entries(COUNTERS)) {
-    $(id).textContent = String(filtered.filter(d => d.class === type).length);
-  }
+  $('totalVehicles').textContent = String(filtered.length).padStart(2,'0');
+  $('uniqueVehicles').textContent = String(everTracked).padStart(2,'0');
+  for (const [type, id] of Object.entries(COUNTERS)) $(id).textContent = String(filtered.filter(d => d.class === type).length);
+  $('trackingStatus').textContent = filtered.length ? `${tracks.filter(t => performance.now()-t.seen<1400).length} ID aktif` : 'Tidak ada objek terdeteksi';
+  const distances = filtered.map(estimateDistance).filter(Number.isFinite);
+  $('nearestDistance').textContent = distances.length ? '~' + Math.min(...distances).toFixed(1) + ' m*' : '—';
 }
 
 async function createCamera() {
   try {
-    return await navigator.mediaDevices.getUserMedia({
-      audio: false,
-      video: {
-        facingMode: { ideal: facingMode },
-        width: { ideal: 1280 },
-        height: { ideal: 720 },
-        frameRate: { ideal: 30, max: 30 }
-      }
-    });
+    return await navigator.mediaDevices.getUserMedia({audio:false,video:{facingMode:{ideal:facingMode},width:{ideal:1280},height:{ideal:720},frameRate:{ideal:30,max:30}}});
   } catch (error) {
-    if (error.name !== 'OverconstrainedError' && error.name !== 'NotFoundError') throw error;
-    return navigator.mediaDevices.getUserMedia({ audio: false, video: { facingMode: { ideal: facingMode } } });
+    if (!['OverconstrainedError','NotFoundError'].includes(error.name)) throw error;
+    return navigator.mediaDevices.getUserMedia({audio:false,video:{facingMode:{ideal:facingMode}}});
   }
+}
+
+async function prepareVideo(session) {
+  // Video metadata can be emitted before a listener is installed.
+  if (!video.videoWidth || !video.videoHeight) {
+    await new Promise((resolve,reject) => {
+      const t = setTimeout(() => { cleanup(); reject(new Error('Metadata video tidak tersedia.')); }, 14000);
+      const onReady = () => { cleanup(); resolve(); };
+      const onError = () => { cleanup(); reject(new Error('Video tidak dapat diputar oleh browser.')); };
+      const cleanup = () => {clearTimeout(t);video.removeEventListener('loadedmetadata',onReady);video.removeEventListener('error',onError);};
+      video.addEventListener('loadedmetadata',onReady);video.addEventListener('error',onError);
+    });
+  }
+  await video.play();
+  if (cameraSession !== session) return;
+  const scale = Math.min(1, 1280 / video.videoWidth, 1280 / video.videoHeight);
+  canvas.width = Math.max(1, Math.round(video.videoWidth * scale));
+  canvas.height = Math.max(1, Math.round(video.videoHeight * scale));
+  $('dimensionLabel').textContent = `${canvas.width} × ${canvas.height}`;
+  $('viewport').classList.add('active');
+  $('viewport').style.minHeight = '0';
+  lastRafTime = 0; displayedFps = 0;
+  resetSessionAnalytics();
+  refreshButtons();
+  drawFrame();
+  beginLaneLoop(session);
+  if (depthEnabled && depthPipe) beginDepthLoop(session);
+  loadModel().then(() => {
+    if (cameraSession === session && isActive() && model) detectFrame(session);
+  }).catch(error => console.warn('Vehicle model:', error));
 }
 
 async function startCamera() {
-  if (cameraActive || cameraBusy) return;
-  if (!isSecureCameraContext()) {
-    toast('Kamera hanya dapat diakses lewat HTTPS atau localhost. Upload website ke hosting HTTPS untuk membuka di HP.', true);
-    return;
-  }
-  cameraBusy = true;
-  refreshButtons();
-  $('cameraHint').textContent = 'Meminta izin akses kamera…';
+  if (isActive() || cameraBusy) return;
+  if (!isSecureCameraContext()) {toast('Kamera membutuhkan HTTPS atau localhost. Gunakan alamat GitHub Pages, bukan file:// atau HTTP biasa.',true);return;}
+  cameraBusy = true; refreshButtons();
+  $('cameraHint').textContent = 'Meminta izin kamera…';
+  const session = ++cameraSession;
   try {
-    const newStream = await createCamera();
-    stream = newStream;
+    stream = await createCamera();
+    if (session !== cameraSession) {stream?.getTracks().forEach(t => t.stop());return;}
     video.srcObject = stream;
-    await video.play();
-    if (!video.videoWidth || !video.videoHeight) {
-      await new Promise(resolve => video.addEventListener('loadedmetadata', resolve, { once: true }));
-    }
-    const scale = Math.min(1, 1280 / video.videoWidth, 1280 / video.videoHeight);
-    canvas.width = Math.max(1, Math.round(video.videoWidth * scale));
-    canvas.height = Math.max(1, Math.round(video.videoHeight * scale));
-    $('dimensionLabel').textContent = `${canvas.width} × ${canvas.height}`;
-    $('viewport').classList.add('active');
-    $('viewport').style.minHeight = '0';
-    cameraActive = true;
-    const currentSession = ++cameraSession;
-    refreshButtons();
-    $('cameraHint').textContent = 'Kamera aktif • AI diproses langsung di perangkat';
-    drawFrame();
-    await loadModel();
-    if (cameraActive && currentSession === cameraSession && model) detectFrame(currentSession);
+    mediaMode = 'camera';
+    $('cameraHint').textContent = 'Kamera aktif • analisis diproses di perangkat';
+    await prepareVideo(session);
   } catch (error) {
-    if (stream) stream.getTracks().forEach(track => track.stop());
-    stream = null;
-    video.srcObject = null;
-    cameraActive = false;
-    $('cameraHint').textContent = 'Gagal mengaktifkan kamera';
-    let info = 'Kamera tidak dapat diakses: ' + (error.message || error.name);
-    if (error.name === 'NotAllowedError' || error.name === 'PermissionDeniedError') info = 'Izin kamera ditolak. Izinkan kamera di pengaturan situs browser, lalu coba kembali.';
-    if (error.name === 'NotReadableError') info = 'Kamera sedang digunakan aplikasi lain. Tutup aplikasi tersebut dan ulangi.';
-    toast(info, true);
-  } finally {
-    cameraBusy = false;
-    refreshButtons();
-  }
+    closeSource();
+    let info = 'Kamera gagal dibuka: ' + (error.message || error.name);
+    if (['NotAllowedError','PermissionDeniedError'].includes(error.name)) info = 'Izin kamera ditolak. Izinkan kamera pada pengaturan situs, lalu ulangi.';
+    if (error.name === 'NotReadableError') info = 'Kamera sedang digunakan aplikasi lain. Tutup aplikasi lain dan coba kembali.';
+    toast(info,true);
+  } finally {cameraBusy = false;refreshButtons();}
 }
 
-function stopCamera() {
-  if (recording) { toast('Hentikan rekaman terlebih dahulu.'); return; }
+async function useFile(file) {
+  if (!file || !file.type.startsWith('video/') || isActive() || cameraBusy) return;
+  cameraBusy = true; refreshButtons();
+  const session = ++cameraSession;
+  try {
+    fileUrl = URL.createObjectURL(file);
+    video.srcObject = null;
+    video.src = fileUrl;
+    video.loop = true;
+    mediaMode = 'file';
+    $('cameraHint').textContent = 'Video lokal untuk pengujian • tidak diunggah';
+    await prepareVideo(session);
+    toast('Video pengujian aktif. Model mendeteksi kendaraan dari rekaman lokal.');
+  } catch(error) {closeSource();toast('Tidak dapat membuka video: '+error.message,true);}
+  finally {cameraBusy = false;refreshButtons();$('videoInput').value='';}
+}
+
+function closeSource() {
   cameraSession++;
-  cameraActive = false;
-  cancelAnimationFrame(animationId);
-  clearTimeout(detectionTimer);
-  if (stream) stream.getTracks().forEach(track => track.stop());
-  stream = null;
-  video.pause();
-  video.srcObject = null;
-  $('viewport').classList.remove('active');
-  $('viewport').style.minHeight = '';
-  $('dimensionLabel').textContent = '— × —';
-  $('fpsLabel').textContent = '— FPS';
-  $('cameraHint').textContent = 'Kamera dimatikan • Tidak ada gambar yang diunggah';
-  clearAnalytics();
+  cancelAnimationFrame(animationId); clearTimeout(detectionTimer); clearTimeout(laneTimer); clearTimeout(depthTimer);
+  stream?.getTracks().forEach(t=>t.stop()); stream=null;
+  video.pause();video.srcObject=null;video.removeAttribute('src');video.load();
+  if(fileUrl) URL.revokeObjectURL(fileUrl);fileUrl=null;
+  mediaMode=null;inferenceErrorCount=0;
+  depthValid=false;
+  $('depthPlaceholder').hidden=false;
+  if(depthEnabled){$('depthBadge').textContent='READY';$('depthStatus').textContent='Depth model siap. Aktifkan kamera atau pilih video.';}
+  $('laneEngineStatus').textContent='Standby';
+  $('viewport').classList.remove('active');$('viewport').style.minHeight='';
+  $('dimensionLabel').textContent='— × —';$('fpsLabel').textContent='— FPS';
+  $('cameraHint').textContent='Sensor offline • tidak ada rekaman yang diunggah ke server';
+  resetSessionAnalytics();
+  $('laneStatus').textContent='Belum dianalisis';
+  $('trackingStatus').textContent='Menunggu kamera';
   refreshButtons();
 }
-
-async function switchCamera() {
-  if (!cameraActive || recording || cameraBusy) return;
-  stopCamera();
-  facingMode = facingMode === 'environment' ? 'user' : 'environment';
-  await startCamera();
-}
+function stopCamera() {if(recording){toast('Hentikan rekaman sebelum menutup kamera.');return;}closeSource();}
+async function switchCamera(){if(mediaMode!=='camera'||cameraBusy||recording)return;closeSource();facingMode=facingMode==='environment'?'user':'environment';await startCamera();}
 
 function injectScript(src) {
-  return new Promise((resolve, reject) => {
-    const script = document.createElement('script');
-    script.src = src;
-    script.async = true;
-    script.onload = resolve;
-    script.onerror = () => reject(new Error('Gagal mengunduh library AI. Periksa koneksi internet.'));
+  return new Promise((resolve,reject)=>{
+    const script=document.createElement('script');script.async=true;script.src=src;
+    script.onload=resolve;script.onerror=()=>reject(new Error('Gagal memuat library AI. Periksa internet.'));
     document.head.appendChild(script);
   });
 }
-
 async function loadModel() {
   if (model) return model;
   if (modelPromise) return modelPromise;
-  $('aiStatus').textContent = 'Memuat model…';
-  modelPromise = (async () => {
-    if (!window.tf) await injectScript('https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.22.0/dist/tf.min.js');
-    if (!window.cocoSsd) await injectScript('https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd@2.2.3/dist/coco-ssd.min.js');
-    try { await tf.setBackend('webgl'); } catch (_) { await tf.setBackend('cpu'); }
-    await tf.ready();
-    model = await cocoSsd.load({ base: 'lite_mobilenet_v2' });
-    $('aiStatus').textContent = 'Aktif (' + tf.getBackend().toUpperCase() + ')';
-    refreshButtons();
-    toast('Model AI aktif. Deteksi kendaraan siap digunakan.');
+  $('aiStatus').textContent='Memuat model…';
+  modelPromise=(async()=>{
+    if(!window.tf)await injectScript('https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.22.0/dist/tf.min.js');
+    if(!window.cocoSsd)await injectScript('https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd@2.2.3/dist/coco-ssd.min.js');
+    try{await tf.setBackend('webgl');}catch(_){await tf.setBackend('cpu');}
+    await tf.ready();model=await cocoSsd.load({base:'lite_mobilenet_v2'});
+    $('aiStatus').textContent='Aktif ('+tf.getBackend().toUpperCase()+')';
+    toast('Vehicle AI siap. ID kendaraan akan dilacak selama sesi.');refreshButtons();
     return model;
   })();
-  try { return await modelPromise; }
-  catch (error) {
-    modelPromise = null;
-    $('aiStatus').textContent = 'Gagal dimuat';
-    toast('Kamera aktif, tetapi deteksi AI gagal: ' + error.message + '. Periksa koneksi internet.', true);
-    return null;
-  }
+  try{return await modelPromise;}catch(error){modelPromise=null;$('aiStatus').textContent='Gagal memuat';toast('Model kendaraan gagal dimuat: '+error.message,true);return null;}
 }
 
+const boxIou=(a,b)=>{
+  const [ax,ay,aw,ah]=a,[bx,by,bw,bh]=b;
+  const intersection=Math.max(0,Math.min(ax+aw,bx+bw)-Math.max(ax,bx))*Math.max(0,Math.min(ay+ah,by+bh)-Math.max(ay,by));
+  return intersection/(aw*ah+bw*bh-intersection||1);
+};
+const centroid=box=>[box[0]+box[2]/2,box[1]+box[3]/2];
+function updateTracking(objects) {
+  const now=performance.now(),vw=video.videoWidth||1,vh=video.videoHeight||1;
+  const matched=new Set();
+  for(const obj of objects) {
+    let selected=null,best=-1;
+    for(const tr of tracks){
+      if(tr.class!==obj.class||matched.has(tr.id))continue;
+      const iou=boxIou(obj.bbox,tr.bbox);
+      const c=centroid(obj.bbox),old=centroid(tr.bbox);
+      const dist=Math.hypot((c[0]-old[0])/vw,(c[1]-old[1])/vh);
+      const maxDist=.085 + .18*Math.max(obj.bbox[2]/vw,obj.bbox[3]/vh);
+      if(iou<.14 && dist>maxDist)continue;
+      const score=iou*1.5-dist*1.2;
+      if(score>best){best=score;selected=tr;}
+    }
+    if(selected){
+      selected.bbox=obj.bbox.slice();selected.score=obj.score;selected.seen=now;
+      selected.history.push(centroid(obj.bbox));
+      if(selected.history.length>20)selected.history.shift();
+      matched.add(selected.id);
+    }else{
+      const id=nextTrackId++;
+      tracks.push({id,class:obj.class,bbox:obj.bbox.slice(),score:obj.score,seen:now,history:[centroid(obj.bbox)]});
+      matched.add(id);everTracked++;
+    }
+  }
+  tracks=tracks.filter(t=>now-t.seen<2100);
+}
+function estimateDistance(obj) {
+  if(!obj||!video.videoWidth)return NaN;
+  const pxWidth=obj.bbox[2];
+  if(pxWidth<=0||pxWidth<video.videoWidth*.006)return NaN;
+  // Pinhole approximation: vehicle width assumed frontal and camera HFOV assumed.
+  const focal=video.videoWidth/(2*Math.tan(hfovDeg*Math.PI/360));
+  return clamp((OBJECT_WIDTHS_M[obj.class]||1.8)*focal/pxWidth,.3,200);
+}
 async function detectFrame(session) {
-  if (!model || !cameraActive || session !== cameraSession) return;
-  const start = performance.now();
+  if(!model||!isActive()||session!==cameraSession)return;
+  const started=performance.now();
   try {
-    if (video.readyState >= 2) {
-      const results = await model.detect(video, 30, 0.25);
-      if (cameraActive && session === cameraSession) {
-        detections = results.filter(item => CLASSES.includes(item.class));
-        updateAnalytics();
+    if(video.readyState>=2){
+      const results=await model.detect(video,30,Math.min(.3,confidenceThreshold*.65));
+      if(session===cameraSession && isActive()){
+        detections=results.filter(d=>CLASSES.includes(d.class));
+        updateTracking(detections.filter(d=>d.score>=confidenceThreshold));
+        updateAnalytics();inferenceErrorCount=0;
       }
     }
-  } catch (error) {
-    console.warn('Deteksi AI gagal:', error);
+  }catch(error){
+    inferenceErrorCount++;
+    console.warn('Vehicle inference:',error);
+    if(inferenceErrorCount===3)toast('Deteksi tersendat. Coba tutup aplikasi lain atau matikan Depth AI.',true);
   }
-  if (cameraActive && session === cameraSession) {
-    const elapsed = performance.now() - start;
-    detectionTimer = setTimeout(() => detectFrame(session), Math.max(70, 450 - elapsed));
+  if(isActive()&&session===cameraSession){
+    const elapsed=performance.now()-started;
+    detectionTimer=setTimeout(()=>detectFrame(session),Math.max(90,480-elapsed));
   }
 }
 
-function drawGuides(w, h) {
+// Lightweight, real image-edge lane *marking* detector; no fake fixed-guide geometry.
+// Scores possible left/right road-line segments using brightness gradients on the actual video.
+function calculateLaneMarkers() {
+  const iw=320,ih=Math.max(112,Math.round(iw*video.videoHeight/video.videoWidth));
+  laneInput.width=iw;laneInput.height=ih;
+  laneInputCtx.drawImage(video,0,0,iw,ih);
+  const rgba=laneInputCtx.getImageData(0,0,iw,ih).data;
+  const grey=new Uint8Array(iw*ih), mag=new Uint16Array(iw*ih);
+  for(let i=0,j=0;i<rgba.length;i+=4,j++)grey[j]=(rgba[i]*77+rgba[i+1]*150+rgba[i+2]*29)>>8;
+  const horizon=Math.round(ih*.51),low=Math.round(ih*.95);
+  for(let y=horizon;y<ih-1;y++)for(let x=2;x<iw-2;x++){
+    const p=y*iw+x;
+    const gx=grey[p+1-iw]+2*grey[p+1]+grey[p+1+iw]-grey[p-1-iw]-2*grey[p-1]-grey[p-1+iw];
+    const gy=grey[p+iw-1]+2*grey[p+iw]+grey[p+iw+1]-grey[p-iw-1]-2*grey[p-iw]-grey[p-iw+1];
+    mag[p]=Math.abs(gx)+Math.abs(gy);
+  }
+  const vw=video.videoWidth,vh=video.videoHeight;
+  const masked=(x,y)=>detections.some(d=>d.score>=confidenceThreshold &&
+    x>=d.bbox[0]/vw*iw-2&&x<=(d.bbox[0]+d.bbox[2])/vw*iw+2 &&
+    y>=d.bbox[1]/vh*ih-2&&y<=(d.bbox[1]+d.bbox[3])/vh*ih+2);
+  function bestFor(side) {
+    let best=null;
+    const xBottomMin=side==='left'?.05:.53,xBottomMax=side==='left'?.49:.96;
+    const xTopMin=side==='left'?.30:.48,xTopMax=side==='left'?.52:.70;
+    for(let bt=xBottomMin;bt<xBottomMax;bt+=.023){
+      for(let tp=xTopMin;tp<xTopMax;tp+=.016){
+        if(side==='left'&&tp<=bt+.035)continue;
+        if(side==='right'&&tp>=bt-.035)continue;
+        let supported=0,valid=0,total=0,bins=[0,0,0];
+        for(let i=0;i<30;i++){
+          const t=i/29,y=Math.round(horizon+(low-horizon)*t);
+          const x=Math.round(iw*(tp+(bt-tp)*t));
+          if(x<4||x>=iw-4||masked(x,y))continue;
+          valid++;
+          const p=y*iw+x;
+          const strength=Math.max(mag[p-2],mag[p-1],mag[p],mag[p+1],mag[p+2]);
+          if(strength>165){supported++;total+=Math.min(1,strength/350);bins[Math.min(2,Math.floor(i/10))]++;}
+        }
+        if(valid<12)continue;
+        const support=supported/valid,score=.72*support+.28*(total/valid);
+        if(support>.45 && bins.filter(v=>v>=3).length>=2 && (!best || score>best.score)) {
+          best={x1:tp*iw,y1:horizon,x2:bt*iw,y2:low,score};
+        }
+      }
+    }
+    return best && best.score>.41?{
+      x1:best.x1/iw*vw,y1:best.y1/ih*vh,
+      x2:best.x2/iw*vw,y2:best.y2/ih*vh,score:best.score
+    }:null;
+  }
+  return {left:bestFor('left'),right:bestFor('right')};
+}
+function updateLaneUI() {
+  const l=!!laneMarkers.left,r=!!laneMarkers.right;
+  $('leftLaneStatus').textContent=l?'TERDETEKSI':'TIDAK ADA';
+  $('rightLaneStatus').textContent=r?'TERDETEKSI':'TIDAK ADA';
+  const label=l&&r?'2 marka terdeteksi':(l||r?'1 marka terdeteksi':'Marka tidak ditemukan');
+  $('laneStatus').textContent=label;
+  $('laneFloatingText').textContent=l&&r?'DUA SISI':(l||r?'SATU SISI':'NOT FOUND');
+  $('laneEngineStatus').textContent='Analisis citra aktif';
+}
+function beginLaneLoop(session) {
+  clearTimeout(laneTimer);
+  const tick=()=>{
+    if(!isActive()||cameraSession!==session)return;
+    try{if(video.readyState>=2 && video.videoWidth){
+      const next=calculateLaneMarkers();
+      // Light smoothing when both detections are continuously found.
+      for(const side of ['left','right']){
+        if(next[side]&&laneMarkers[side]){
+          for(const k of ['x1','y1','x2','y2'])next[side][k]=.3*next[side][k]+.7*laneMarkers[side][k];
+        }
+      }
+      laneMarkers=next;laneLastUpdated=performance.now();updateLaneUI();
+    }}catch(e){console.warn('Lane analyzer:',e);$('laneEngineStatus').textContent='Gagal analisis';}
+    if(isActive()&&cameraSession===session)laneTimer=setTimeout(tick,750);
+  };
+  laneTimer=setTimeout(tick,350);
+}
+
+function drawLaneLines(w,h) {
+  if(!showLane||!video.videoWidth)return;
+  const sx=w/video.videoWidth,sy=h/video.videoHeight;
   ctx.save();
-  const gradient = ctx.createLinearGradient(0, h * 0.5, 0, h);
-  gradient.addColorStop(0, 'rgba(22,234,252,.18)');
-  gradient.addColorStop(1, 'rgba(22,234,252,.72)');
-  ctx.strokeStyle = gradient;
-  ctx.lineWidth = Math.max(1.5, w / 420);
-  ctx.setLineDash([w * .012, w * .013]);
-  const horizon = h * .48;
-  [[.465, .18], [.535, .82]].forEach(([x1, x2]) => {
-    ctx.beginPath();
-    ctx.moveTo(w * x1, horizon);
-    ctx.lineTo(w * x2, h);
-    ctx.stroke();
-  });
-  ctx.setLineDash([]);
-  ctx.strokeStyle = 'rgba(22,234,252,.25)';
-  [0.67, 0.81].forEach(y => {ctx.beginPath();ctx.moveTo(w * (.465 - (y - .48) * .38), h * y);ctx.lineTo(w * (.535 + (y - .48) * .38), h * y);ctx.stroke();});
+  for(const [side,line] of Object.entries(laneMarkers)){
+    if(!line)continue;
+    const x1=line.x1*sx,y1=line.y1*sy,x2=line.x2*sx,y2=line.y2*sy;
+    ctx.lineCap='round';ctx.lineWidth=Math.max(3,w/270);ctx.strokeStyle='#ffe776';
+    ctx.shadowColor='#ffdd2b';ctx.shadowBlur=10;
+    ctx.beginPath();ctx.moveTo(x1,y1);ctx.lineTo(x2,y2);ctx.stroke();
+    ctx.shadowBlur=0;ctx.lineWidth=Math.max(1,w/650);ctx.strokeStyle='#fff5c1';ctx.stroke();
+    ctx.font=`700 ${Math.max(10,w/88)}px system-ui`;
+    ctx.fillStyle='#fff2ac';ctx.fillText(side==='left'?'LANE L':'LANE R',x2+8,clamp(y2-10,15,h-10));
+  }
   ctx.restore();
 }
-
-function drawBoxes(w, h) {
-  const sx = w / video.videoWidth;
-  const sy = h / video.videoHeight;
-  const font = Math.max(11, Math.min(20, w / 60));
-  for (const item of detections) {
-    if (item.score < confidenceThreshold) continue;
-    let [x, y, bw, bh] = item.bbox;
-    x = Math.max(0, x * sx); y = Math.max(0, y * sy);
-    bw = Math.min(w - x, bw * sx); bh = Math.min(h - y, bh * sy);
-    if (bw <= 0 || bh <= 0) continue;
-    const color = COLORS[item.class] || '#16dcff';
-    const corner = Math.max(9, Math.min(25, bw * .2, bh * .2));
+function drawTracking(w,h) {
+  if(!video.videoWidth)return;
+  const sx=w/video.videoWidth,sy=h/video.videoHeight;
+  const font=Math.max(11,Math.min(19,w/63));
+  const now=performance.now();
+  for(const tr of tracks){
+    if(now-tr.seen>1350 || tr.score<confidenceThreshold)continue;
+    const color=COLORS[tr.class]||'#20dbff';
+    const [ox,oy,ow,oh]=tr.bbox;
+    const x=ox*sx,y=oy*sy,bw=ow*sx,bh=oh*sy;
+    if(bw<=2||bh<=2)continue;
     ctx.save();
-    ctx.strokeStyle = color;
-    ctx.lineWidth = Math.max(2, w / 500);
-    ctx.strokeRect(x, y, bw, bh);
-    ctx.lineWidth *= 2;
-    for (const [px, py, dx, dy] of [[x, y, 1, 1], [x + bw, y, -1, 1], [x, y + bh, 1, -1], [x + bw, y + bh, -1, -1]]) {
-      ctx.beginPath();ctx.moveTo(px + dx * corner, py);ctx.lineTo(px, py);ctx.lineTo(px, py + dy * corner);ctx.stroke();
+    if(showTrail&&tr.history.length>1){
+      ctx.strokeStyle=color+'aa';ctx.lineWidth=Math.max(2,w/560);
+      ctx.beginPath();tr.history.forEach(([px,py],i)=>i?ctx.lineTo(px*sx,py*sy):ctx.moveTo(px*sx,py*sy));ctx.stroke();
     }
-    const label = `${NAMES[item.class]} ${Math.round(item.score * 100)}%`;
-    ctx.font = `700 ${font}px system-ui,sans-serif`;
-    const labelW = ctx.measureText(label).width + 16;
-    const labelY = Math.max(font + 16, y);
-    ctx.fillStyle = color;
-    ctx.fillRect(x, labelY - font - 13, labelW, font + 14);
-    ctx.fillStyle = '#001a2b';
-    ctx.fillText(label, x + 8, labelY - 10);
+    ctx.strokeStyle=color;ctx.lineWidth=Math.max(2,w/600);
+    ctx.strokeRect(x,y,bw,bh);
+    const corner=Math.min(23,Math.max(8,Math.min(bw,bh)*.18));ctx.lineWidth*=1.7;
+    for(const [px,py,dx,dy] of [[x,y,1,1],[x+bw,y,-1,1],[x,y+bh,1,-1],[x+bw,y+bh,-1,-1]]){
+      ctx.beginPath();ctx.moveTo(px+dx*corner,py);ctx.lineTo(px,py);ctx.lineTo(px,py+dy*corner);ctx.stroke();
+    }
+    const dist=estimateDistance(tr);
+    const label=`#${String(tr.id).padStart(2,'0')} ${NAMES[tr.class]} ${Math.round(tr.score*100)}%`;
+    ctx.font=`750 ${font}px system-ui,sans-serif`;
+    const labelWidth=ctx.measureText(label).width+15;
+    const ly=Math.max(font+10,y);
+    ctx.fillStyle=color;ctx.fillRect(x,ly-font-9,labelWidth,font+12);
+    ctx.fillStyle='#001826';ctx.fillText(label,x+7,ly-5);
+    if(Number.isFinite(dist)){
+      const distanceLabel=`~${dist.toFixed(1)} m*`;
+      ctx.font=`750 ${Math.max(10,font*.85)}px system-ui`;
+      const tagWidth=ctx.measureText(distanceLabel).width+12;
+      ctx.fillStyle='rgba(2,21,38,.85)';ctx.fillRect(x,Math.min(h-18,y+bh+3),tagWidth,font+7);
+      ctx.fillStyle='#fbf5db';ctx.fillText(distanceLabel,x+6,Math.min(h-6,y+bh+font+3));
+    }
     ctx.restore();
   }
 }
-
-function drawHud(w, h) {
-  ctx.save();
-  const f = Math.max(10, Math.round(w / 90));
-  const p = Math.max(8, Math.round(w / 70));
-  ctx.font = `700 ${f}px ui-monospace,monospace`;
-  ctx.fillStyle = '#b7fdff';
-  ctx.shadowColor = '#000';ctx.shadowBlur = 4;
-  ctx.fillText('ZYY / ROAD VISION  ● AI', p, p + f);
-  ctx.textAlign = 'right';
-  ctx.fillText(new Date().toLocaleString('id-ID', { hour12: false }), w - p, p + f);
-  ctx.textAlign = 'left';
-  const bottomY = h - p;
-  ctx.fillStyle = 'rgba(3,15,28,.66)';
-  ctx.fillRect(0, h - 2 * p - f, w, 2 * p + f);
-  ctx.fillStyle = '#abecf9';
-  ctx.fillText(`${String(detections.filter(item => item.score >= confidenceThreshold).length).padStart(2, '0')} KENDARAAN TERLIHAT`, p, bottomY);
-  ctx.textAlign = 'right';
-  ctx.fillText(showGuide ? 'GUIDE: ILUSTRASI' : 'GUIDE: OFF', w - p, bottomY);
-  if (recording) {ctx.fillStyle = '#ff526a';ctx.beginPath();ctx.arc(w / 2 - 23, p + f - 5, f * .4, 0, 2 * Math.PI);ctx.fill();}
+function drawDepthInset(w,h){
+  if(!showDepthOverlay||!depthEnabled||!depthValid)return;
+  const boxW=w*.27,boxH=boxW*(depthCanvas.height/depthCanvas.width);
+  const margin=Math.max(12,w*.024),x=w-margin-boxW,y=h*.16;
+  ctx.save();ctx.fillStyle='rgba(0,18,33,.9)';ctx.fillRect(x-4,y-19,boxW+8,boxH+24);
+  ctx.drawImage(depthCanvas,x,y,boxW,boxH);
+  ctx.strokeStyle='#59bdeb';ctx.strokeRect(x,y,boxW,boxH);
+  ctx.font=`700 ${Math.max(9,w*.010)}px system-ui`;ctx.fillStyle='#c9f8ff';ctx.fillText('AI DEPTH / RELATIVE',x,y-6);ctx.restore();
+}
+function drawHud(w,h){
+  const font=Math.max(10,Math.round(w/90)),p=Math.max(8,Math.round(w/70));
+  ctx.save();ctx.font=`750 ${font}px ui-monospace,monospace`;
+  ctx.fillStyle='#b7fdff';ctx.shadowColor='#000';ctx.shadowBlur=5;
+  ctx.fillText('ZYY / ROAD VISION V2.0',p,p+font);
+  ctx.textAlign='right';ctx.fillText(new Date().toLocaleTimeString('id-ID',{hour12:false}),w-p,p+font);
+  ctx.shadowBlur=0;ctx.fillStyle='rgba(3,15,27,.76)';ctx.fillRect(0,h-2*p-font,w,2*p+font);
+  ctx.fillStyle='#b6ebf9';ctx.textAlign='left';
+  ctx.fillText(`${String(detections.filter(d=>d.score>=confidenceThreshold).length).padStart(2,'0')} VISIBLE | ${everTracked} TRACK IDs`,p,h-p);
+  ctx.textAlign='right';ctx.fillText('DISTANCE APPROX. / DEPTH RELATIVE',w-p,h-p);
+  if(recording){ctx.fillStyle='#ff526a';ctx.beginPath();ctx.arc(w/2,p+font-5,font*.42,0,2*Math.PI);ctx.fill();}
   ctx.restore();
 }
-
-function drawFrame(timestamp = 0) {
-  if (!cameraActive) return;
-  if (video.readyState >= 2 && canvas.width && canvas.height) {
-    const w = canvas.width, h = canvas.height;
-    ctx.drawImage(video, 0, 0, w, h);
-    if (showGuide) drawGuides(w, h);
-    drawBoxes(w, h);
-    drawHud(w, h);
+function drawFrame(timestamp=0){
+  if(!isActive())return;
+  if(video.readyState>=2&&canvas.width&&canvas.height){
+    const w=canvas.width,h=canvas.height;
+    ctx.drawImage(video,0,0,w,h);
+    drawLaneLines(w,h);
+    drawTracking(w,h);
+    drawDepthInset(w,h);
+    drawHud(w,h);
   }
-  if (timestamp && lastRafTime) {
-    const instantaneous = 1000 / (timestamp - lastRafTime || 1);
-    displayedFps = displayedFps * .9 + instantaneous * .1;
-    if (Math.round(timestamp / 1000) !== Math.round(lastRafTime / 1000)) $('fpsLabel').textContent = Math.round(Math.min(99, displayedFps)) + ' FPS';
+  if(timestamp&&lastRafTime){
+    const delta=timestamp-lastRafTime;
+    if(delta>0){displayedFps=displayedFps*.9+1000/delta*.1;
+      if(Math.floor(timestamp/1000)!==Math.floor(lastRafTime/1000))$('fpsLabel').textContent=Math.round(clamp(displayedFps,0,99))+' FPS';}
   }
-  lastRafTime = timestamp;
-  animationId = requestAnimationFrame(drawFrame);
+  lastRafTime=timestamp;
+  animationId=requestAnimationFrame(drawFrame);
 }
 
-function selectedMimeType() {
-  const options = [
-    'video/mp4;codecs="avc1.42E01E"',
-    'video/webm;codecs=vp8',
-    'video/webm;codecs=vp9',
-    'video/mp4',
-    'video/webm'
-  ];
-  return options.find(type => MediaRecorder.isTypeSupported(type)) || '';
+function depthPalette(v){
+  // Monocular depth predictions are *relative*; this ramp is visual only.
+  const stops=[[8,34,100],[21,100,220],[39,181,214],[122,240,160],[255,222,99],[255,95,89]];
+  const f=clamp(v,0,1)*(stops.length-1),j=Math.min(stops.length-2,Math.floor(f)),t=f-j;
+  return stops[j].map((x,k)=>Math.round(x+(stops[j+1][k]-x)*t));
 }
-
-function startRecording() {
-  if (!cameraActive || recording) return;
-  if (!window.MediaRecorder || !canvas.captureStream) {toast('Fitur perekaman canvas belum didukung browser ini.', true);return;}
+function renderDepthMap(depth) {
+  if(!depth||!depth.width||!depth.height||!depth.data)throw new Error('Output peta kedalaman tidak dikenali.');
+  const w=depth.width,h=depth.height,n=w*h,channels=depth.channels||1;
+  // downscale depth on canvas to reduce allocation on mobile.
+  const id=dctx.createImageData(w,h),out=id.data,source=depth.data;
+  let min=255,max=0;
+  for(let i=0;i<n;i++){const v=source[i*channels];min=Math.min(min,v);max=Math.max(max,v);}
+  const spread=Math.max(1,max-min);
+  for(let i=0;i<n;i++){
+    const v=(source[i*channels]-min)/spread;
+    const [r,g,b]=depthPalette(v);
+    out[i*4]=r;out[i*4+1]=g;out[i*4+2]=b;out[i*4+3]=255;
+  }
+  depthCanvas.width=w;depthCanvas.height=h;
+  dctx.putImageData(id,0,0);
+  depthValid=true;$('depthPlaceholder').hidden=true;
+  $('depthStatus').textContent='AI Depth berjalan pada frame sampel. Warna menunjukkan kedalaman relatif, bukan meter. Pembaruan tidak setiap frame.';
+  $('depthBadge').textContent='AI ACTIVE';$('depthEngineStatus').textContent='Relatif / aktif';
+}
+async function toggleDepth() {
+  if(depthLoading)return;
+  if(depthEnabled){
+    depthEnabled=false;depthGeneration++;clearTimeout(depthTimer);depthValid=false;
+    $('depthPlaceholder').hidden=false;
+    $('depthBadge').textContent='OFF';$('depthEngineStatus').textContent='Nonaktif';
+    $('depthStatus').textContent='Depth AI dinonaktifkan. Aktifkan lagi untuk melanjutkan.';
+    refreshButtons();return;
+  }
+  depthLoading=true;refreshButtons();
+  $('depthStatus').textContent='Mengunduh model Depth Anything V2 dan runtime ke browser. Perlu internet dan memori bebas.';
+  $('depthEngineStatus').textContent='Memuat…';
   try {
-    const capturedStream = canvas.captureStream(24);
-    recorderStream = capturedStream;
-    const preferredMimeType = selectedMimeType();
-    const options = { videoBitsPerSecond: 2500000 };
-    if (preferredMimeType) options.mimeType = preferredMimeType;
-    recorder = new MediaRecorder(capturedStream, options);
-    recordChunks = [];
-    const currentRecorder = recorder;
-    currentRecorder.ondataavailable = event => {if (event.data?.size) recordChunks.push(event.data);};
-    currentRecorder.onerror = event => {toast('Terjadi kesalahan saat merekam: ' + (event.error?.message || 'tidak diketahui'), true);};
-    currentRecorder.onstop = () => {
-      const mime = currentRecorder.mimeType || preferredMimeType || 'video/webm';
-      if (recordChunks.length) {
-        lastRecordingBlob = new Blob(recordChunks, { type: mime });
-        const ext = mime.includes('mp4') ? 'mp4' : 'webm';
-        lastRecordingFilename = `ZYY-ROAD-VISION_${timestampForFile()}.${ext}`;
-        if (lastRecordingUrl) URL.revokeObjectURL(lastRecordingUrl);
-        lastRecordingUrl = URL.createObjectURL(lastRecordingBlob);
-        $('recordNote').textContent = `Rekaman siap (${(lastRecordingBlob.size / 1048576).toFixed(1)} MB). Jika unduhan otomatis tidak muncul, klik "Simpan Rekaman Terakhir".`;
-        refreshButtons();
-        downloadRecording();
-      } else {
-        toast('Tidak ada data video yang dihasilkan. Coba ulangi atau gunakan browser lain.', true);
+    if(!depthPipe){
+      const {pipeline, RawImage}=await import('https://cdn.jsdelivr.net/npm/@huggingface/transformers@4.3.2');
+      depthRawImage=RawImage;
+      // q8 uses the ~27MB quantized model. WASM is broadly supported, though slower on phones.
+      depthPipe=await pipeline('depth-estimation','onnx-community/depth-anything-v2-small',{device:'wasm',dtype:'q8'});
+    }
+    depthEnabled=true;depthGeneration++;
+    $('depthStatus').textContent=isActive()?'Model siap. Memproses kedalaman relatif…':'Model siap. Aktifkan kamera atau pilih video.';
+    $('depthBadge').textContent='READY';$('depthEngineStatus').textContent='Siap';
+    toast('Depth model siap. Peta kedalaman akan memperbarui beberapa detik sekali.');
+    if(isActive())beginDepthLoop(cameraSession);
+  } catch(error){
+    console.error('Depth pipeline load:',error);
+    $('depthStatus').textContent='Depth AI tidak dapat dijalankan di perangkat/browser ini. Deteksi kendaraan dan marka tetap tersedia.';
+    $('depthEngineStatus').textContent='Tidak tersedia';
+    toast('Gagal memuat Depth AI: '+(error.message||'model tidak didukung'),true);
+  } finally{depthLoading=false;refreshButtons();}
+}
+function beginDepthLoop(session){
+  clearTimeout(depthTimer);
+  const generation=depthGeneration;
+  const tick=async()=>{
+    if(!isActive()||!depthEnabled||!depthPipe||generation!==depthGeneration||session!==cameraSession)return;
+    if(depthBusy){depthTimer=setTimeout(tick,1000);return;}
+    depthBusy=true;
+    try{
+      if(video.readyState>=2){
+        depthInput.width=320;depthInput.height=Math.round(320*video.videoHeight/video.videoWidth);
+        depthInputCtx.drawImage(video,0,0,depthInput.width,depthInput.height);
+        const output=await depthPipe(depthRawImage.fromCanvas(depthInput));
+        if(generation===depthGeneration&&session===cameraSession&&depthEnabled){
+          renderDepthMap(output.depth);
+        }
       }
-      recordChunks = [];
-      capturedStream.getTracks().forEach(track => track.stop());
-      if (recorderStream === capturedStream) recorderStream = null;
+    }catch(error){
+      console.warn('Depth inference:',error);
+      $('depthEngineStatus').textContent='Gagal inferensi';
+      $('depthStatus').textContent='Inferensi depth gagal. Matikan fitur jika HP melambat. '+(error.message||'');
+      // Avoid retry loops that overheat a phone.
+      depthEnabled=false;depthGeneration++;depthValid=false;
+      $('depthPlaceholder').hidden=false; $('depthBadge').textContent='OFF';
+      toast('Depth tidak berhasil dijalankan, dinonaktifkan otomatis.',true);
+      refreshButtons();
+    }finally{depthBusy=false;}
+    if(depthEnabled&&isActive()&&generation===depthGeneration&&session===cameraSession)depthTimer=setTimeout(tick,4800);
+  };
+  depthTimer=setTimeout(tick,500);
+}
+
+function selectedMimeType(){
+  if(!window.MediaRecorder)return '';
+  const candidates=['video/mp4;codecs="avc1.42E01E"','video/webm;codecs=vp8','video/webm;codecs=vp9','video/mp4','video/webm'];
+  return candidates.find(t=>MediaRecorder.isTypeSupported(t))||'';
+}
+function startRecording(){
+  if(!isActive()||recording)return;
+  if(!window.MediaRecorder||!canvas.captureStream){toast('Browser ini tidak mendukung perekaman canvas.',true);return;}
+  try{
+    const captured=canvas.captureStream(24);recorderStream=captured;
+    const mime=selectedMimeType(),opts={videoBitsPerSecond:2500000};if(mime)opts.mimeType=mime;
+    recorder=new MediaRecorder(captured,opts);recordChunks=[];
+    const current=recorder;
+    current.ondataavailable=e=>{if(e.data?.size)recordChunks.push(e.data);};
+    current.onerror=e=>toast('Perekaman gagal: '+(e.error?.message||'MediaRecorder'),true);
+    current.onstop=()=>{
+      const format=current.mimeType||mime||'video/webm';
+      if(recordChunks.length){
+        lastRecordingBlob=new Blob(recordChunks,{type:format});
+        lastRecordingFilename=`ZYY-ROAD-VISION-v2_${timestampForFile()}.${format.includes('mp4')?'mp4':'webm'}`;
+        if(lastRecordingUrl)URL.revokeObjectURL(lastRecordingUrl);
+        lastRecordingUrl=URL.createObjectURL(lastRecordingBlob);
+        $('recordNote').textContent=`Rekaman siap (${(lastRecordingBlob.size/1048576).toFixed(1)} MB). Periksa folder Unduhan; klik Simpan Rekaman Terakhir jika perlu.`;
+        refreshButtons();downloadRecording();
+      }else toast('Tidak ada data video. Coba lagi dengan browser yang lain.',true);
+      recordChunks=[];captured.getTracks().forEach(t=>t.stop());
+      if(recorderStream===captured)recorderStream=null;
     };
-    currentRecorder.start(1000);
-    recording = true;
-    recordStartedAt = Date.now();
-    $('recordSub').textContent = 'Perekaman sedang berlangsung';
-    const dialDot = document.querySelector('.rec-dial > span');
-    if (dialDot) dialDot.classList.add('recording');
-    updateRecordTime();
-    recordingTimer = setInterval(updateRecordTime, 500);
-    refreshButtons();
-    toast('Perekaman dimulai. Kotak deteksi AI akan masuk ke dalam video.');
-  } catch (error) {
-    if (recorderStream) recorderStream.getTracks().forEach(track => track.stop());
-    recorderStream = null;
-    toast('Gagal memulai rekaman: ' + error.message, true);
-  }
+    current.start(1000);recording=true;recordStartedAt=Date.now();
+    $('recordSub').textContent='Sedang merekam overlay AI';
+    document.querySelector('.rec-dial > span').classList.add('recording');
+    updateRecordTime();recordingTimer=setInterval(updateRecordTime,500);refreshButtons();
+    toast('Rekaman dimulai. Kotak tracking, jalur, dan inset depth (jika aktif) disertakan.');
+  }catch(error){recorderStream?.getTracks().forEach(t=>t.stop());recorderStream=null;toast('Gagal memulai: '+error.message,true);}
 }
-
-function updateRecordTime() {
-  if (!recording) return;
-  const elapsed = Date.now() - recordStartedAt;
-  const label = fmtDuration(elapsed / 1000);
-  $('recordDisplay').textContent = label;
-  $('recTime').textContent = label;
-  if (elapsed >= MAX_RECORD_MS) {toast('Batas 5 menit tercapai, rekaman dihentikan untuk menghemat memori.');stopRecording();}
+function updateRecordTime(){
+  if(!recording)return;
+  const ms=Date.now()-recordStartedAt,label=fmtDuration(ms);
+  $('recordDisplay').textContent=label;$('recTime').textContent=label;
+  if(ms>=MAX_RECORD_MS){toast('Rekaman 5 menit selesai untuk membatasi penggunaan memori.');stopRecording();}
 }
-
-function stopRecording() {
-  if (!recording) return;
-  recording = false;
-  clearInterval(recordingTimer);
-  $('recordSub').textContent = 'Menyiapkan file rekaman…';
-  const dialDot = document.querySelector('.rec-dial > span');
-  if (dialDot) dialDot.classList.remove('recording');
+function stopRecording(){
+  if(!recording)return;
+  recording=false;clearInterval(recordingTimer);
+  $('recordSub').textContent='Menyiapkan file rekaman…';
+  document.querySelector('.rec-dial > span').classList.remove('recording');
   refreshButtons();
-  try {if (recorder?.state !== 'inactive') recorder.stop();} catch (error) {toast('Gagal mengakhiri rekaman: ' + error.message, true);}
+  try{if(recorder?.state!=='inactive')recorder.stop();}catch(error){toast('Gagal menghentikan rekaman: '+error.message,true);}
+}
+function triggerDownload(url,name){
+  const link=document.createElement('a');link.href=url;link.download=name;link.rel='noopener';
+  document.body.appendChild(link);link.click();link.remove();
+}
+function downloadRecording(){
+  if(!lastRecordingBlob||!lastRecordingUrl)return;
+  triggerDownload(lastRecordingUrl,lastRecordingFilename);
+  $('recordSub').textContent='Rekaman siap disimpan';
+  toast('Unduhan diminta. Periksa folder Unduhan/Files HP. Jika gagal, tekan Simpan Rekaman Terakhir.');
+}
+function takePhoto(){
+  if(!isActive())return;
+  canvas.toBlob(blob=>{
+    if(!blob){toast('Gagal membuat foto.',true);return;}
+    const url=URL.createObjectURL(blob);
+    triggerDownload(url,`ZYY-ROAD-VISION-v2_${timestampForFile()}.png`);
+    setTimeout(()=>URL.revokeObjectURL(url),10000);toast('Foto AI disiapkan untuk unduhan.');
+  },'image/png');
 }
 
-function triggerDownload(blobUrl, name) {
-  const link = document.createElement('a');
-  link.href = blobUrl;
-  link.download = name;
-  link.rel = 'noopener';
-  document.body.append(link);
-  link.click();
-  link.remove();
-}
-function downloadRecording() {
-  if (!lastRecordingBlob || !lastRecordingUrl) return;
-  triggerDownload(lastRecordingUrl, lastRecordingFilename);
-  $('recordSub').textContent = 'Rekaman siap disimpan';
-  toast('Permintaan unduh dikirim. Periksa folder Unduhan/Files; jika perlu klik tombol Simpan Rekaman Terakhir.');
-}
-
-function takePhoto() {
-  if (!cameraActive) return;
-  canvas.toBlob(blob => {
-    if (!blob) {toast('Gagal menyimpan foto.', true);return;}
-    const url = URL.createObjectURL(blob);
-    triggerDownload(url, `ZYY-ROAD-VISION_${timestampForFile()}.png`);
-    setTimeout(() => URL.revokeObjectURL(url), 10000);
-    toast('Foto dengan deteksi AI sedang diunduh.');
-  }, 'image/png');
-}
-
-$('activateBtn').addEventListener('click', startCamera);
-$('startBtn').addEventListener('click', startCamera);
-$('stopBtn').addEventListener('click', stopCamera);
-$('flipBtn').addEventListener('click', switchCamera);
-$('shotBtn').addEventListener('click', takePhoto);
-$('recordBtn').addEventListener('click', () => recording ? stopRecording() : startRecording());
-$('downloadBtn').addEventListener('click', downloadRecording);
-$('confidence').addEventListener('input', event => {
-  confidenceThreshold = Number(event.target.value) / 100;
-  $('confidenceValue').textContent = event.target.value + '%';
-  updateAnalytics();
+$('activateBtn').addEventListener('click',startCamera);
+$('startBtn').addEventListener('click',startCamera);
+$('uploadBtn').addEventListener('click',()=>$('videoInput').click());
+$('videoInput').addEventListener('change',e=>useFile(e.target.files?.[0]));
+$('stopBtn').addEventListener('click',stopCamera);
+$('flipBtn').addEventListener('click',switchCamera);
+$('shotBtn').addEventListener('click',takePhoto);
+$('recordBtn').addEventListener('click',()=>recording?stopRecording():startRecording());
+$('downloadBtn').addEventListener('click',downloadRecording);
+$('depthBtn').addEventListener('click',toggleDepth);
+$('confidence').addEventListener('input',e=>{confidenceThreshold=Number(e.target.value)/100;$('confidenceValue').textContent=e.target.value+'%';updateAnalytics();});
+$('cameraFov').addEventListener('input',e=>{hfovDeg=Number(e.target.value);$('fovValue').textContent=e.target.value+'°';updateAnalytics();});
+$('laneSwitch').addEventListener('change',e=>{showLane=e.target.checked;refreshButtons();});
+$('trailSwitch').addEventListener('change',e=>{showTrail=e.target.checked;});
+$('depthOverlaySwitch').addEventListener('change',e=>{showDepthOverlay=e.target.checked;});
+window.addEventListener('pagehide',()=>{
+  clearInterval(recordingTimer);clearTimeout(detectionTimer);clearTimeout(laneTimer);clearTimeout(depthTimer);
+  try{if(recorder?.state==='recording')recorder.stop();}catch(_){/*noop*/}
+  stream?.getTracks().forEach(t=>t.stop());
+  if(fileUrl)URL.revokeObjectURL(fileUrl);
 });
-$('guideSwitch').addEventListener('change', event => {showGuide = event.target.checked;});
-window.addEventListener('pagehide', () => {
-  clearInterval(recordingTimer);
-  if (recorder?.state === 'recording') recorder.stop();
-  if (stream) stream.getTracks().forEach(track => track.stop());
-});
-window.addEventListener('beforeunload', event => {
-  if (recording) {event.preventDefault();event.returnValue = '';}
-});
-refreshButtons();
+window.addEventListener('beforeunload',e=>{if(recording){e.preventDefault();e.returnValue='';}});
+refreshButtons();resetSessionAnalytics();
