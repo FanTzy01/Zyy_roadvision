@@ -4,8 +4,8 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
   <meta name="theme-color" content="#06111f" />
-  <meta name="description" content="ZYY-ROAD VISION v2.0 — AI vehicle detection, object tracking, lane detection, relative depth map, and local recording." />
-  <title>ZYY-ROAD VISION v2.0 | Advanced Road Intelligence</title>
+  <meta name="description" content="ZYY-ROAD VISION v3.0 — AI vehicle detection, object tracking, lane detection, relative depth map, and local recording." />
+  <title>ZYY-ROAD VISION v3.0 | Advanced Road Intelligence</title>
   <link rel="stylesheet" href="./style.css" />
 </head>
 <body>
@@ -14,15 +14,15 @@
     <header class="topbar">
       <div class="brand">
         <div class="brand-logo" aria-hidden="true">Z<span class="logo-pulse"></span></div>
-        <div><div class="brand-name">ZYY<span class="dash">/</span>ROAD VISION <span class="version">V2.0</span></div><div class="brand-sub">ADVANCED ROAD INTELLIGENCE</div></div>
+        <div><div class="brand-name">ZYY<span class="dash">/</span>ROAD VISION <span class="version">V3.0</span></div><div class="brand-sub">ROAD + HUMAN INTELLIGENCE</div></div>
       </div>
       <div class="top-status"><span class="state-dot" id="stateDot"></span><span id="headerStatus">STANDBY</span><span class="status-spacer"></span><span class="local-tag">LOCAL AI</span></div>
     </header>
 
-    <div class="hero-heading"><div><p class="eyebrow"><span class="line"></span> COMPUTER VISION COMMAND CENTER</p><h1>Kenali kendaraan. <span>Baca kondisi jalan.</span></h1><p class="subtitle">Pelacakan ID kendaraan, analisis garis marka jalan, jarak perkiraan, dan AI Depth Map — diproses pada browser HP.</p></div><div class="hero-mark">Z<span>RV</span></div></div>
+    <div class="hero-heading"><div><p class="eyebrow"><span class="line"></span> COMPUTER VISION COMMAND CENTER</p><h1>Pantau objek. <span>Catat tanpa hitung berulang.</span></h1><p class="subtitle">Deteksi kendaraan dan manusia, identitas berbasis badge/manual, daftar objek unik, analisis marka, dan peta kedalaman relatif. Diproses pada browser HP.</p></div><div class="hero-mark">Z<span>RV</span></div></div>
 
     <div class="feature-strip" aria-label="Fitur versi 2">
-      <span><i class="feature-indicator"></i> VEHICLE TRACKING</span><span><i class="feature-indicator"></i> LANE ANALYSIS</span><span><i class="feature-indicator"></i> DISTANCE ESTIMATE</span><span><i class="feature-indicator"></i> MONOCULAR DEPTH</span>
+      <span><i class="feature-indicator"></i> PEOPLE + VEHICLE TRACKING</span><span><i class="feature-indicator"></i> LANE ANALYSIS</span><span><i class="feature-indicator"></i> UNIQUE EVENT LOG</span><span><i class="feature-indicator"></i> MONOCULAR DEPTH</span>
     </div>
 
     <main class="layout">
@@ -30,11 +30,11 @@
         <div class="panel-top"><div class="panel-title"><span class="corner-icon">⌗</span> LIVE VISION <small id="cameraLabel">CAMERA OFFLINE</small></div><div class="fps-label" id="fpsLabel">— FPS</div></div>
         <div class="viewport" id="viewport">
           <video id="camera" autoplay muted playsinline aria-hidden="true"></video>
-          <canvas id="display" aria-label="Video kamera beserta deteksi, lintasan kendaraan, dan jalur terdeteksi"></canvas>
+          <canvas id="display" aria-label="Video kamera, objek manusia dan kendaraan, identitas yang ditandai, serta marka"></canvas>
           <div class="empty-viewport" id="emptyViewport">
             <div class="radar"><div class="radar-sweep"></div><span class="radar-center">⌖</span></div>
             <h2>ROAD SENSOR OFFLINE</h2>
-            <p>Aktifkan kamera HP untuk mendeteksi lalu lintas secara langsung, atau pilih rekaman untuk menguji analisis.</p>
+            <p>Aktifkan kamera HP untuk mendeteksi kendaraan dan manusia secara langsung, atau pilih rekaman untuk menguji analisis.</p>
             <button class="btn btn-primary" id="activateBtn" type="button">◉ &nbsp; AKTIFKAN KAMERA</button>
             <span class="empty-note">Kamera membutuhkan HTTPS atau localhost.</span>
           </div>
@@ -51,19 +51,59 @@
           <button id="flipBtn" class="btn btn-outline" type="button" disabled>⇄ Ganti Kamera</button>
           <button id="shotBtn" class="btn btn-outline" type="button" disabled>▧ Foto</button>
         </div>
-        <div class="disclaimer">ⓘ Analisis hanya dari bidang pandang kamera, tidak mendeteksi 360°. Jangan mengoperasikan HP saat mengemudi. Bukan perangkat keselamatan berkendara.</div>
+        <div class="disclaimer">ⓘ Analisis hanya dari bidang pandang kamera, tidak mendeteksi 360°. Jangan mengoperasikan HP saat mengemudi. Bukan perangkat keselamatan berkendara. Identitas Zyy memerlukan QR badge atau penandaan manual; foto profil tidak dipakai untuk pengenalan wajah otomatis.</div>
       </section>
 
       <aside class="sidebar">
         <section class="side-card" aria-label="Analisis kendaraan">
           <div class="section-heading"><span class="section-glyph">▦</span><h2>VEHICLE ANALYTICS</h2><span class="tiny-label">LIVE</span></div>
           <div class="stat-grid">
-            <div class="stat-primary"><div class="stat-number" id="totalVehicles">00</div><div class="stat-copy"><strong>TERLIHAT</strong><span>Dalam frame terbaru</span></div></div>
-            <div class="stat-secondary"><div class="stat-number" id="uniqueVehicles">00</div><div class="stat-copy"><strong>ID DILACAK</strong><span>Selama sesi ini*</span></div></div>
+            <div class="stat-primary"><div class="stat-number" id="totalVehicles">00</div><div class="stat-copy"><strong>TERLIHAT</strong><span>Kendaraan dalam frame</span></div></div>
+            <div class="stat-secondary"><div class="stat-number" id="uniqueVehicles">00</div><div class="stat-copy"><strong>TERCATAT UNIK</strong><span>Kendaraan dalam daftar*</span></div></div>
           </div>
           <div class="vehicle-stats"><div><span>Mobil</span><strong id="countCar">0</strong></div><div><span>Motor</span><strong id="countMotorcycle">0</strong></div><div><span>Bus</span><strong id="countBus">0</strong></div><div><span>Truk</span><strong id="countTruck">0</strong></div><div><span>Sepeda</span><strong id="countBicycle">0</strong></div></div>
           <div class="mini-status"><span>TRACKING STATUS</span><strong id="trackingStatus">Menunggu kamera</strong></div>
-          <p class="side-desc small">*ID adalah perkiraan, bukan hitungan pasti kendaraan yang melintas. ID dapat berubah setelah kendaraan terhalang.</p>
+          <p class="side-desc small">*Satu objek dihitung sekali selama tracking tetap tersambung. Jika menghilang lama atau masuk kembali, ID baru mungkin muncul; tersedia tombol gabungkan duplikat.</p>
+        </section>
+
+
+        <section class="side-card people-card" aria-label="Deteksi manusia dan registrasi identitas">
+          <div class="section-heading"><span class="section-glyph">♙</span><h2>HUMAN INTELLIGENCE</h2><span class="tiny-label">PEOPLE AI</span></div>
+          <div class="people-stats">
+            <div><strong id="visiblePeople">00</strong><span>MANUSIA DI FRAME</span></div>
+            <div><strong id="uniquePeople">00</strong><span>MANUSIA UNIK*</span></div>
+            <div><strong id="unknownPeople">00</strong><span>BELUM DIKENALI</span></div>
+          </div>
+          <div class="identity-card">
+            <img src="./assets/zyy-profile.jpg" alt="Foto profil terdaftar Zyy" width="74" height="74" loading="lazy" />
+            <div class="identity-copy"><span class="tiny-eyebrow">PROFIL TERDAFTAR</span><strong>Zyy</strong><small>Zyy System Development</small><span class="identity-note">Identitas lewat QR badge / verifikasi manual, bukan pemindaian wajah.</span></div>
+          </div>
+          <div class="assign-row"><label for="knownTrack">Pilih orang yang sedang terlacak</label><select id="knownTrack" aria-label="Pilih ID person yang hendak ditandai"><option value="">— Belum ada orang —</option></select></div>
+          <button id="assignZyyBtn" class="btn btn-secondary" type="button" disabled>✓ Tandai pilihan sebagai Zyy</button>
+          <div class="calib-section">
+            <strong class="card-minor-title">KALIBRASI PERKIRAAN TINGGI</strong>
+            <p>Orang acuan harus terlihat seluruh tubuhnya, berdiri tegak, dan berada pada kedalaman yang sebanding dengan objek lain.</p>
+            <label for="referenceHeightCm">Tinggi acuan yang diketahui (cm)</label>
+            <div class="height-control"><input id="referenceHeightCm" type="number" min="80" max="230" step="1" placeholder="Contoh: 170" /><button id="calibrateBtn" class="btn btn-outline" disabled>Kalibrasi ID terpilih</button></div>
+            <p id="heightCalibrationStatus">Belum dikalibrasi. Tanpa kalibrasi, tinggi manusia tidak ditampilkan.</p>
+          </div>
+          <div class="qr-status" id="qrStatus">QR badge: belum diperiksa</div>
+          <details class="badge-details"><summary>Lihat QR identitas Zyy</summary><div class="badge-info"><img src="./assets/zyy-badge.png" alt="Kode QR identitas manual Zyy" loading="lazy" width="128" height="128"/><p>Tunjukkan badge ini di area tubuh saat kamera hidup. Badge bukan bukti keamanan dan dapat disalin; gunakan hanya dalam pengujian dengan persetujuan.</p></div></details>
+          <p class="side-desc small">*Tanpa pengenalan biometrik. "Tidak dikenali" berarti belum ditandai; bukan kesimpulan identitas. Perkiraan tinggi hanya untuk posisi setara dengan acuan dan bisa keliru.</p>
+        </section>
+
+        <section class="side-card log-card" aria-label="Pencatatan objek unik otomatis">
+          <div class="section-heading"><span class="section-glyph">☷</span><h2>OBJECT ENTRY LOG</h2><span class="tiny-label">LOCAL LOG</span></div>
+          <div class="people-stats log-stats"><div><strong id="uniqueAll">00</strong><span>TOTAL UNIK</span></div><div><strong id="eventTotal">00</strong><span>CATATAN AKTIF</span></div><div><strong id="mergedTotal">00</strong><span>DIGABUNGKAN</span></div></div>
+          <div class="log-toolbar"><button class="btn btn-outline" id="exportCsvBtn" type="button">↓ Ekspor CSV</button><button class="btn btn-outline danger-btn" id="clearLogBtn" type="button">↺ Reset Daftar</button></div>
+          <div class="event-list" id="eventList" aria-live="polite"><p class="event-empty">Belum ada objek yang terdeteksi.</p></div>
+          <details class="duplicate-details"><summary>Gabungkan catatan duplikat</summary>
+            <p>Jika satu objek mendapat ID baru setelah terhalang/keluar frame, gabungkan ke catatan sebelumnya.</p>
+            <label for="duplicateSource">Catatan yang salah dihitung ulang</label><select id="duplicateSource"><option value="">Pilih ID duplikat</option></select>
+            <label for="duplicateTarget">Gabungkan ke catatan lama</label><select id="duplicateTarget"><option value="">Pilih ID asli</option></select>
+            <button class="btn btn-secondary" id="mergeBtn">Gabungkan tanpa menghitung ulang</button>
+          </details>
+          <p class="side-desc small">Tersimpan lokal di browser ini (maks. 500 catatan). Video tidak dikirim ke server. Identitas berdasarkan QR/manual; kendaraan dan orang asing dipisahkan memakai ID pelacakan, bukan identifikasi permanen lintas kunjungan.</p>
         </section>
 
         <section class="side-card" aria-label="Analisis jalur dan jarak">
@@ -103,7 +143,7 @@
 
         <section class="side-card system-card">
           <div class="section-heading"><span class="section-glyph">⌘</span><h2>SYSTEM STATUS</h2></div>
-          <div class="sys-row"><span>Vehicle AI</span><strong id="aiStatus">Belum dimuat</strong></div>
+          <div class="sys-row"><span>Object AI</span><strong id="aiStatus">Belum dimuat</strong></div>
           <div class="sys-row"><span>Input video</span><strong id="cameraStatus">Offline</strong></div>
           <div class="sys-row"><span>Lane engine</span><strong id="laneEngineStatus">Standby</strong></div>
           <div class="sys-row"><span>Depth engine</span><strong id="depthEngineStatus">Standby</strong></div>
@@ -112,7 +152,7 @@
         </section>
       </aside>
     </main>
-    <footer><span>ZYY SYSTEMS © 2026 • EXPERIMENTAL COMPUTER VISION</span><span>BUILD 2.0 / ROAD INTELLIGENCE</span></footer>
+    <footer><span>ZYY SYSTEMS © 2026 • EXPERIMENTAL COMPUTER VISION • LOCAL EVENT LOG</span><span>BUILD 3.0 / PEOPLE + ROAD</span></footer>
   </div>
   <div class="toast" id="toast" role="status" aria-live="polite"></div>
   <script src="./app.js" defer></script>

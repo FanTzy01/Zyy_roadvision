@@ -1,4 +1,4 @@
-/* ZYY-ROAD VISION v2.0 — browser-only computer vision prototype.
+/* ZYY-ROAD VISION v3.0 — browser-only computer vision prototype.
  * Distance is an uncalibrated pinhole-camera estimate; depth is relative.
  * Do not use any output for collision avoidance or driving decisions.
  */
@@ -14,16 +14,16 @@ const laneInput = document.createElement('canvas');
 const laneInputCtx = laneInput.getContext('2d', { willReadFrequently: true });
 const depthInput = document.createElement('canvas');
 const depthInputCtx = depthInput.getContext('2d');
-const CLASSES = ['car', 'motorcycle', 'bus', 'truck', 'bicycle'];
-const NAMES = { car: 'MOBIL', motorcycle: 'MOTOR', bus: 'BUS', truck: 'TRUK', bicycle: 'SEPEDA' };
-const COLORS = { car: '#13e9ff', motorcycle: '#ffc971', bus: '#7cffb4', truck: '#f4a6ff', bicycle: '#89baff' };
+const CLASSES = ['car', 'motorcycle', 'bus', 'truck', 'bicycle', 'person'];
+const NAMES = { car: 'MOBIL', motorcycle: 'MOTOR', bus: 'BUS', truck: 'TRUK', bicycle: 'SEPEDA', person: 'MANUSIA' };
+const COLORS = { car: '#13e9ff', motorcycle: '#ffc971', bus: '#7cffb4', truck: '#f4a6ff', bicycle: '#89baff', person: '#7bffd5' };
 const COUNTERS = { car: 'countCar', motorcycle: 'countMotorcycle', bus: 'countBus', truck: 'countTruck', bicycle: 'countBicycle' };
 const OBJECT_WIDTHS_M = { car: 1.8, motorcycle: .75, bus: 2.5, truck: 2.5, bicycle: .6 };
 const MAX_RECORD_MS = 5 * 60 * 1000;
 
 let stream = null, mediaMode = null, fileUrl = null, facingMode = 'environment';
 let model = null, modelPromise = null, cameraBusy = false, cameraSession = 0;
-let animationId = null, detectionTimer = null, laneTimer = null, depthTimer = null;
+let animationId = null, detectionTimer = null, laneTimer = null, depthTimer = null, badgeTimer = null;
 let lastRafTime = 0, displayedFps = 0, inferenceErrorCount = 0;
 let detections = [], tracks = [], nextTrackId = 1, everTracked = 0;
 let laneMarkers = { left: null, right: null }, laneLastUpdated = 0;
@@ -35,6 +35,13 @@ let recorder = null, recorderStream = null, recording = false, recordChunks = []
 let recordStartedAt = 0, recordingTimer = null;
 let lastRecordingBlob = null, lastRecordingFilename = '', lastRecordingUrl = null;
 let toastTimeout = null;
+const LOG_STORAGE_KEY = 'zyy-road-vision-v3-event-log';
+const KNOWN_BADGE = 'ZYYRV3:ZYY:badge-01';
+let eventLog = [], nextLogNumber = 1;
+let barcodeDetector = null, badgeScannerType = 'none', badgeBusy = false;
+let heightCalibration = null;
+let lastPeopleSelectKey = '';
+
 
 const isSecureCameraContext = () => window.isSecureContext && !!navigator.mediaDevices?.getUserMedia;
 const isActive = () => mediaMode !== null;
@@ -77,12 +84,15 @@ function refreshButtons() {
   $('cameraStatus').textContent = !active ? 'Offline' : (mediaMode === 'file' ? 'Video lokal' : 'Kamera aktif');
   $('cameraFloating').hidden = !active || !model;
   $('laneFloating').hidden = !active || !showLane;
+  $('assignZyyBtn').disabled = !getSelectedPersonTrack();
+  $('calibrateBtn').disabled = !getSelectedPersonTrack();
   $('depthBtn').disabled = depthLoading;
   $('depthBtn').textContent = depthLoading ? '◈ Memuat model Depth…' : (depthEnabled ? '■ Nonaktifkan Depth AI' : '◈ Aktifkan Depth AI');
 }
 
 function resetSessionAnalytics() {
   detections = []; tracks = []; nextTrackId = 1; everTracked = 0;
+  heightCalibration=null; updateCalibrationLabel();
   laneMarkers = {left:null, right:null}; laneLastUpdated = 0;
   $('uniqueVehicles').textContent = '00';
   $('trackingStatus').textContent = 'Menunggu deteksi';
@@ -96,12 +106,18 @@ function resetSessionAnalytics() {
 
 function updateAnalytics() {
   const filtered = detections.filter(d => d.score >= confidenceThreshold);
-  $('totalVehicles').textContent = String(filtered.length).padStart(2,'0');
-  $('uniqueVehicles').textContent = String(everTracked).padStart(2,'0');
-  for (const [type, id] of Object.entries(COUNTERS)) $(id).textContent = String(filtered.filter(d => d.class === type).length);
-  $('trackingStatus').textContent = filtered.length ? `${tracks.filter(t => performance.now()-t.seen<1400).length} ID aktif` : 'Tidak ada objek terdeteksi';
-  const distances = filtered.map(estimateDistance).filter(Number.isFinite);
-  $('nearestDistance').textContent = distances.length ? '~' + Math.min(...distances).toFixed(1) + ' m*' : '—';
+  const vehicles = filtered.filter(d=>d.class!=='person');
+  const humans = filtered.filter(d=>d.class==='person');
+  $('totalVehicles').textContent = String(vehicles.length).padStart(2,'0');
+  for (const [type,id] of Object.entries(COUNTERS)) $(id).textContent = String(vehicles.filter(d=>d.class===type).length);
+  const activeTracks=tracks.filter(t=>performance.now()-t.seen<1400&&t.score>=confidenceThreshold);
+  $('visiblePeople').textContent=String(humans.length).padStart(2,'0');
+  $('unknownPeople').textContent=String(activeTracks.filter(t=>t.class==='person'&&!t.personId).length).padStart(2,'0');
+  $('trackingStatus').textContent=filtered.length ? `${activeTracks.length} ID aktif` : 'Tidak ada objek terdeteksi';
+  const distances = vehicles.map(estimateDistance).filter(Number.isFinite);
+  $('nearestDistance').textContent = distances.length ? '~'+Math.min(...distances).toFixed(1)+' m*' : '—';
+  updateObjectTotals();
+  refreshPersonSelector();
 }
 
 async function createCamera() {
@@ -137,6 +153,7 @@ async function prepareVideo(session) {
   refreshButtons();
   drawFrame();
   beginLaneLoop(session);
+  beginBadgeLoop(session);
   if (depthEnabled && depthPipe) beginDepthLoop(session);
   loadModel().then(() => {
     if (cameraSession === session && isActive() && model) detectFrame(session);
@@ -173,7 +190,7 @@ async function useFile(file) {
     fileUrl = URL.createObjectURL(file);
     video.srcObject = null;
     video.src = fileUrl;
-    video.loop = true;
+    video.loop = false; // Jangan otomatis menghitung ulang objek di klip yang diputar berulang.
     mediaMode = 'file';
     $('cameraHint').textContent = 'Video lokal untuk pengujian • tidak diunggah';
     await prepareVideo(session);
@@ -184,7 +201,7 @@ async function useFile(file) {
 
 function closeSource() {
   cameraSession++;
-  cancelAnimationFrame(animationId); clearTimeout(detectionTimer); clearTimeout(laneTimer); clearTimeout(depthTimer);
+  cancelAnimationFrame(animationId); clearTimeout(detectionTimer); clearTimeout(laneTimer); clearTimeout(depthTimer); clearTimeout(badgeTimer);
   stream?.getTracks().forEach(t=>t.stop()); stream=null;
   video.pause();video.srcObject=null;video.removeAttribute('src');video.load();
   if(fileUrl) URL.revokeObjectURL(fileUrl);fileUrl=null;
@@ -251,15 +268,17 @@ function updateTracking(objects) {
     if(selected){
       selected.bbox=obj.bbox.slice();selected.score=obj.score;selected.seen=now;
       selected.history.push(centroid(obj.bbox));
+      if(selected.class==='person') syncHeightForTrack(selected);
       if(selected.history.length>20)selected.history.shift();
       matched.add(selected.id);
     }else{
       const id=nextTrackId++;
-      tracks.push({id,class:obj.class,bbox:obj.bbox.slice(),score:obj.score,seen:now,history:[centroid(obj.bbox)]});
-      matched.add(id);everTracked++;
+      const track={id,class:obj.class,bbox:obj.bbox.slice(),score:obj.score,seen:now,history:[centroid(obj.bbox)],personId:null};
+      tracks.push(track); matched.add(id); everTracked++;
+      registerNewObject(track);
     }
   }
-  tracks=tracks.filter(t=>now-t.seen<2100);
+  tracks=tracks.filter(t=>now-t.seen<6500);
 }
 function estimateDistance(obj) {
   if(!obj||!video.videoWidth)return NaN;
@@ -410,13 +429,24 @@ function drawTracking(w,h) {
     for(const [px,py,dx,dy] of [[x,y,1,1],[x+bw,y,-1,1],[x,y+bh,1,-1],[x+bw,y+bh,-1,-1]]){
       ctx.beginPath();ctx.moveTo(px+dx*corner,py);ctx.lineTo(px,py);ctx.lineTo(px,py+dy*corner);ctx.stroke();
     }
-    const dist=estimateDistance(tr);
+    const dist=tr.class==='person'?NaN:estimateDistance(tr);
     const label=`#${String(tr.id).padStart(2,'0')} ${NAMES[tr.class]} ${Math.round(tr.score*100)}%`;
     ctx.font=`750 ${font}px system-ui,sans-serif`;
     const labelWidth=ctx.measureText(label).width+15;
     const ly=Math.max(font+10,y);
     ctx.fillStyle=color;ctx.fillRect(x,ly-font-9,labelWidth,font+12);
     ctx.fillStyle='#001826';ctx.fillText(label,x+7,ly-5);
+    if(tr.class==='person'){
+      const identity=tr.personId==='ZYY'?'Zyy • Zyy System Development':'TIDAK DIKENALI';
+      const height=estimatePersonHeight(tr);
+      const heightText=Number.isFinite(height)?` • tinggi ~${Math.round(height)} cm*`:' • tinggi: belum terukur';
+      ctx.font=`700 ${Math.max(10,font*.8)}px system-ui,sans-serif`;
+      const sub=identity+heightText;
+      const subWidth=ctx.measureText(sub).width+14;
+      const subY=Math.min(h-20,ly+3);
+      ctx.fillStyle='rgba(0,29,35,.9)';ctx.fillRect(x,subY,Math.min(w-x,subWidth),font+12);
+      ctx.fillStyle='#d5fff1';ctx.fillText(sub,x+6,subY+font+1);
+    }
     if(Number.isFinite(dist)){
       const distanceLabel=`~${dist.toFixed(1)} m*`;
       ctx.font=`750 ${Math.max(10,font*.85)}px system-ui`;
@@ -440,11 +470,11 @@ function drawHud(w,h){
   const font=Math.max(10,Math.round(w/90)),p=Math.max(8,Math.round(w/70));
   ctx.save();ctx.font=`750 ${font}px ui-monospace,monospace`;
   ctx.fillStyle='#b7fdff';ctx.shadowColor='#000';ctx.shadowBlur=5;
-  ctx.fillText('ZYY / ROAD VISION V2.0',p,p+font);
+  ctx.fillText('ZYY / ROAD VISION V3.0',p,p+font);
   ctx.textAlign='right';ctx.fillText(new Date().toLocaleTimeString('id-ID',{hour12:false}),w-p,p+font);
   ctx.shadowBlur=0;ctx.fillStyle='rgba(3,15,27,.76)';ctx.fillRect(0,h-2*p-font,w,2*p+font);
   ctx.fillStyle='#b6ebf9';ctx.textAlign='left';
-  ctx.fillText(`${String(detections.filter(d=>d.score>=confidenceThreshold).length).padStart(2,'0')} VISIBLE | ${everTracked} TRACK IDs`,p,h-p);
+  ctx.fillText(`${String(detections.filter(d=>d.score>=confidenceThreshold).length).padStart(2,'0')} VISIBLE | ${countUniqueLog()} UNIQUE`,p,h-p);
   ctx.textAlign='right';ctx.fillText('DISTANCE APPROX. / DEPTH RELATIVE',w-p,h-p);
   if(recording){ctx.fillStyle='#ff526a';ctx.beginPath();ctx.arc(w/2,p+font-5,font*.42,0,2*Math.PI);ctx.fill();}
   ctx.restore();
@@ -574,7 +604,7 @@ function startRecording(){
       const format=current.mimeType||mime||'video/webm';
       if(recordChunks.length){
         lastRecordingBlob=new Blob(recordChunks,{type:format});
-        lastRecordingFilename=`ZYY-ROAD-VISION-v2_${timestampForFile()}.${format.includes('mp4')?'mp4':'webm'}`;
+        lastRecordingFilename=`ZYY-ROAD-VISION-v3_${timestampForFile()}.${format.includes('mp4')?'mp4':'webm'}`;
         if(lastRecordingUrl)URL.revokeObjectURL(lastRecordingUrl);
         lastRecordingUrl=URL.createObjectURL(lastRecordingBlob);
         $('recordNote').textContent=`Rekaman siap (${(lastRecordingBlob.size/1048576).toFixed(1)} MB). Periksa folder Unduhan; klik Simpan Rekaman Terakhir jika perlu.`;
@@ -584,7 +614,7 @@ function startRecording(){
       if(recorderStream===captured)recorderStream=null;
     };
     current.start(1000);recording=true;recordStartedAt=Date.now();
-    $('recordSub').textContent='Sedang merekam overlay AI';
+    $('recordSub').textContent='Sedang merekam overlay AI + manusia';
     document.querySelector('.rec-dial > span').classList.add('recording');
     updateRecordTime();recordingTimer=setInterval(updateRecordTime,500);refreshButtons();
     toast('Rekaman dimulai. Kotak tracking, jalur, dan inset depth (jika aktif) disertakan.');
@@ -619,10 +649,231 @@ function takePhoto(){
   canvas.toBlob(blob=>{
     if(!blob){toast('Gagal membuat foto.',true);return;}
     const url=URL.createObjectURL(blob);
-    triggerDownload(url,`ZYY-ROAD-VISION-v2_${timestampForFile()}.png`);
+    triggerDownload(url,`ZYY-ROAD-VISION-v3_${timestampForFile()}.png`);
     setTimeout(()=>URL.revokeObjectURL(url),10000);toast('Foto AI disiapkan untuk unduhan.');
   },'image/png');
 }
+
+
+// ====================== V3: UNIQUE OBJECT REGISTER ======================
+// No face recognition is used. An identity is assigned only by user action or
+// by an explicitly displayed QR badge. QR content is public and spoofable.
+function loadObjectLog(){
+  try{
+    const saved=JSON.parse(localStorage.getItem(LOG_STORAGE_KEY)||'[]');
+    if(Array.isArray(saved))eventLog=saved.filter(v=>v && typeof v.id==='string' && typeof v.class==='string' && typeof v.time==='string').slice(-500);
+  }catch(_){eventLog=[];}
+  nextLogNumber=1+eventLog.reduce((m,v)=>Math.max(m,Number((v.id||'').split('-').pop())||0),0);
+  renderEventLog();updateObjectTotals();
+}
+function storeObjectLog(){
+  try{localStorage.setItem(LOG_STORAGE_KEY,JSON.stringify(eventLog.slice(-500)));}
+  catch(error){console.warn('Tidak bisa menyimpan localStorage',error);}
+}
+function getLogEvent(track){return eventLog.find(v=>v.id===track?.eventId);}
+function activeLogEvents(){return eventLog.filter(v=>!v.mergedInto);}
+function countUniqueLog(){return activeLogEvents().length;}
+function registerNewObject(track){
+  const event={id:'OBJ-'+String(nextLogNumber++).padStart(4,'0'),
+    trackId:track.id,time:new Date().toISOString(),class:track.class,
+    name:track.class==='person'?'Tidak dikenali':NAMES[track.class],
+    status:track.class==='person'?'Tidak dikenali':'Kendaraan terdeteksi',
+    heightCm:null,knownKey:null,mergedInto:null};
+  track.eventId=event.id;
+  eventLog.push(event);
+  if(eventLog.length>500)eventLog=eventLog.slice(-500);
+  storeObjectLog();renderEventLog();updateObjectTotals();
+}
+function updateObjectTotals(){
+  const unique=activeLogEvents();
+  $('uniqueAll').textContent=String(unique.length).padStart(2,'0');
+  $('eventTotal').textContent=String(eventLog.length).padStart(2,'0');
+  $('mergedTotal').textContent=String(eventLog.length-unique.length).padStart(2,'0');
+  $('uniqueVehicles').textContent=String(unique.filter(v=>v.class!=='person').length).padStart(2,'0');
+  $('uniquePeople').textContent=String(unique.filter(v=>v.class==='person').length).padStart(2,'0');
+}
+function renderEventLog(){
+  const root=$('eventList');root.replaceChildren();
+  if(!eventLog.length){const empty=document.createElement('p');empty.className='event-empty';empty.textContent='Belum ada objek yang terdeteksi.';root.appendChild(empty);}
+  else for(const event of [...eventLog].reverse().slice(0,85)){
+    const row=document.createElement('div');row.className='event-row'+(event.mergedInto?' is-merged':'');
+    const id=document.createElement('span');id.className='event-id';id.textContent=event.id;
+    const label=document.createElement('strong');label.textContent=event.name;
+    const tag=document.createElement('small');const dt=new Date(event.time);
+    const hh=Number.isNaN(+dt)?event.time:dt.toLocaleString('id-ID',{dateStyle:'short',timeStyle:'medium'});
+    tag.textContent=`${hh} • ${event.status}${Number.isFinite(event.heightCm)?' • ~'+Math.round(event.heightCm)+' cm*':''}${event.mergedInto?' • Gabung ke '+event.mergedInto:''}`;
+    const icon=document.createElement('span');icon.className='event-icon';icon.textContent=event.class==='person'?'♙':'▣';
+    const info=document.createElement('div');info.className='event-info';info.append(id,label,tag);row.append(icon,info);root.appendChild(row);
+  }
+  const keepOptions=(selectId,defaultText)=>{
+    const select=$(selectId),selection=select.value;select.replaceChildren();
+    const placeholder=new Option(defaultText,'');select.add(placeholder);
+    for(const ev of activeLogEvents())select.add(new Option(`${ev.id} — ${ev.name}`,ev.id));
+    select.value=[...select.options].some(o=>o.value===selection)?selection:'';
+  };
+  keepOptions('duplicateSource','Pilih ID duplikat');
+  keepOptions('duplicateTarget','Pilih ID asli');
+}
+function mergeLogEvent(sourceId,targetId,quiet=false){
+  if(!sourceId||!targetId||sourceId===targetId){if(!quiet)toast('Pilih dua catatan berbeda.',true);return false;}
+  const src=eventLog.find(x=>x.id===sourceId),target=eventLog.find(x=>x.id===targetId);
+  if(!src||!target||src.mergedInto||target.mergedInto||src.class!==target.class){if(!quiet)toast('Jenis objek harus sama dan kedua catatan belum digabung.',true);return false;}
+  src.mergedInto=target.id;
+  storeObjectLog();renderEventLog();updateObjectTotals();
+  if(!quiet)toast(`${src.id} digabung ke ${target.id}. Total unik berkurang satu.`);
+  return true;
+}
+function clearObjectLog(){
+  if(!window.confirm('Hapus seluruh daftar objek dan mulai pencatatan dari nol?'))return;
+  eventLog=[];nextLogNumber=1;
+  // Keep active trackers associated with an event, so they are counted again only once.
+  for(const tr of tracks) registerNewObject(tr);
+  storeObjectLog();renderEventLog();updateObjectTotals();toast('Daftar objek direset. Objek aktif dimasukkan kembali sekali.');
+}
+function exportObjectCSV(){
+  const rows=[['ID','Waktu','Jenis','Nama','Status','Tinggi perkiraan (cm)','Duplikat dari','Metode identitas']];
+  for(const e of eventLog)rows.push([e.id,e.time,e.class,e.name,e.status,e.heightCm??'',e.mergedInto||'',e.knownKey?'Badge QR / verifikasi manual':'Tidak ada']);
+  const csv='\uFEFF'+rows.map(r=>r.map(x=>'"'+String(x).replace(/"/g,'""')+'"').join(',')).join('\r\n');
+  const url=URL.createObjectURL(new Blob([csv],{type:'text/csv;charset=utf-8'}));
+  triggerDownload(url,`ZYY-ROAD-OBJECT-LOG_${timestampForFile()}.csv`);
+  setTimeout(()=>URL.revokeObjectURL(url),20000);toast('Catatan objek diekspor menjadi CSV.');
+}
+
+// ================== V3: HUMAN ID + HEIGHT CALIBRATION ==================
+function getSelectedPersonTrack(){
+  const id=Number($('knownTrack').value);
+  if(!id)return null;
+  return tracks.find(t=>t.id===id&&t.class==='person'&&performance.now()-t.seen<2300)||null;
+}
+function refreshPersonSelector(){
+  const select=$('knownTrack');const previous=select.value;
+  const alive=tracks.filter(t=>t.class==='person'&&performance.now()-t.seen<2300 && t.score>=confidenceThreshold);
+  const key=alive.map(t=>t.id+':'+(t.personId||'')).join(',');
+  if(lastPeopleSelectKey!==key){
+    select.replaceChildren();select.add(new Option(alive.length?'Pilih Person ID':'— Belum ada orang —',''));
+    for(const tr of alive)select.add(new Option(`#${tr.id} — ${tr.personId==='ZYY'?'Zyy':'Tidak dikenali'}`,String(tr.id)));
+    if(alive.some(t=>String(t.id)===previous))select.value=previous;
+    lastPeopleSelectKey=key;
+  }
+  $('assignZyyBtn').disabled=!getSelectedPersonTrack();
+  $('calibrateBtn').disabled=!getSelectedPersonTrack();
+}
+function assignZyyToTrack(track,method='manual'){
+  if(!track||track.class!=='person')return;
+  track.personId='ZYY';
+  const log=getLogEvent(track);if(!log)return;
+  log.name='Zyy';log.status='Zyy System Development';log.knownKey='ZYY';
+  // The same registered badge/person can only contribute one unique entry.
+  const existing=eventLog.find(e=>e.id!==log.id&&e.knownKey==='ZYY'&&!e.mergedInto);
+  if(existing) mergeLogEvent(log.id,existing.id,true);
+  storeObjectLog();renderEventLog();updateObjectTotals();refreshPersonSelector();updateAnalytics();
+  $('qrStatus').textContent=method==='qr'?'QR Zyy terbaca • ID dipasang pada objek terdekat':'Identitas Zyy dipasang lewat verifikasi manual';
+  if(method==='manual')toast(`Person #${track.id} ditandai Zyy (manual).`);
+}
+function estimatePersonHeight(track){
+  if(!track||track.class!=='person'||!heightCalibration||!video.videoHeight)return NaN;
+  const box=track.bbox,foot=box[1]+box[3],vh=video.videoHeight;
+  // Refuse estimates if feet/head are clipped, or perspective differs too much.
+  if(box[1]<vh*.014 || foot>vh*.982 || box[3]<vh*.13)return NaN;
+  if(Math.abs(foot/vh-heightCalibration.footY)>0.065)return NaN;
+  const h=heightCalibration.heightCm*box[3]/heightCalibration.pixelHeight;
+  return h>=90&&h<=230?h:NaN;
+}
+function syncHeightForTrack(track){
+  const h=estimatePersonHeight(track),log=getLogEvent(track);
+  if(log && Number.isFinite(h) && (!Number.isFinite(log.heightCm)||Math.abs(log.heightCm-h)>3)){
+    log.heightCm=Math.round(h);storeObjectLog();renderEventLog();
+  }
+}
+function updateCalibrationLabel(){
+  if(!$('heightCalibrationStatus'))return;
+  $('heightCalibrationStatus').textContent=heightCalibration?
+    `Kalibrasi dari #${heightCalibration.trackId}: ${heightCalibration.heightCm} cm. Hanya untuk orang pada jarak/sudut serupa.`:
+    'Belum dikalibrasi. Tanpa kalibrasi, tinggi manusia tidak ditampilkan.';
+}
+function calibrateHeight(){
+  const tr=getSelectedPersonTrack(),cm=Number($('referenceHeightCm').value);
+  if(!tr){toast('Pilih person yang terlihat utuh terlebih dahulu.',true);return;}
+  if(!Number.isFinite(cm)||cm<80||cm>230){toast('Masukkan tinggi acuan 80–230 cm yang benar-benar diketahui.',true);return;}
+  const [x,y,w,h]=tr.bbox,vh=video.videoHeight;
+  if(!vh||y<vh*.014||y+h>vh*.982||h<vh*.13){toast('Pastikan kepala sampai kaki masuk seluruh frame untuk kalibrasi.',true);return;}
+  heightCalibration={trackId:tr.id,heightCm:cm,pixelHeight:h,footY:(y+h)/vh};
+  updateCalibrationLabel();
+  for(const person of tracks.filter(t=>t.class==='person'))syncHeightForTrack(person);
+  toast('Kalibrasi tersimpan selama kamera/video ini aktif. Nilainya perkiraan, bukan hasil ukur presisi.');
+}
+
+// QR detection is voluntary and NOT facial identification. The badge can be
+// copied, and not all browsers support native BarcodeDetector.
+async function prepareBadgeScanner(){
+  if(badgeScannerType!=='none')return;
+  if('BarcodeDetector' in window){
+    try{
+      const formats=await BarcodeDetector.getSupportedFormats();
+      if(formats.includes('qr_code')){barcodeDetector=new BarcodeDetector({formats:['qr_code']});badgeScannerType='native';$('qrStatus').textContent='QR scanner aktif (browser)';return;}
+    }catch(_){/*fallback*/}
+  }
+  try{await injectScript('https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js');
+    if(window.jsQR){badgeScannerType='jsqr';$('qrStatus').textContent='QR scanner aktif (fallback jsQR)';return;}
+  }catch(error){console.warn('QR script',error);}
+  badgeScannerType='unavailable';$('qrStatus').textContent='QR tidak tersedia. Gunakan Tandai pilihan sebagai Zyy.';
+}
+const badgeInput=document.createElement('canvas');
+const badgeInputCtx=badgeInput.getContext('2d',{willReadFrequently:true});
+async function scanBadgeVideo(){
+  if(video.readyState<2||!video.videoWidth||badgeBusy||badgeScannerType==='unavailable')return;
+  badgeBusy=true;
+  try{
+    let codes=[];
+    if(badgeScannerType==='native'){
+      codes=(await barcodeDetector.detect(video)).map(r=>({value:r.rawValue,box:r.boundingBox}));
+    }else if(badgeScannerType==='jsqr'){
+      const vw=video.videoWidth,vh=video.videoHeight,w=640,h=Math.max(1,Math.round(vh*640/vw));
+      badgeInput.width=w;badgeInput.height=h;badgeInputCtx.drawImage(video,0,0,w,h);
+      const data=badgeInputCtx.getImageData(0,0,w,h);
+      const result=window.jsQR(data.data,w,h,{inversionAttempts:'dontInvert'});
+      if(result){
+        const pts=Object.values(result.location).filter(v=>v&&typeof v.x==='number'&&typeof v.y==='number');
+        const xs=pts.map(v=>v.x*vw/w),ys=pts.map(v=>v.y*vh/h);
+        if(xs.length)codes=[{value:result.data,box:{x:Math.min(...xs),y:Math.min(...ys),width:Math.max(...xs)-Math.min(...xs),height:Math.max(...ys)-Math.min(...ys)}}];
+      }
+    }
+    for(const qr of codes){
+      if(qr.value!==KNOWN_BADGE)continue;
+      const cx=qr.box.x+qr.box.width/2,cy=qr.box.y+qr.box.height/2;
+      const choices=tracks.filter(t=>t.class==='person'&&performance.now()-t.seen<2000).filter(t=>{
+        const [x,y,w,h]=t.bbox;return cx>=x-w*.12&&cx<=x+w*1.12&&cy>=y-h*.12&&cy<=y+h*1.12;
+      });
+      choices.sort((a,b)=>{
+        const ca=centroid(a.bbox),cb=centroid(b.bbox);
+        return Math.hypot(ca[0]-cx,ca[1]-cy)-Math.hypot(cb[0]-cx,cb[1]-cy);
+      });
+      if(choices.length){assignZyyToTrack(choices[0],'qr');break;}
+      $('qrStatus').textContent='QR Zyy terdeteksi tetapi belum berada di dalam kotak Person.';
+    }
+  }catch(error){console.warn('Badge scan',error);}
+  finally{badgeBusy=false;}
+}
+function beginBadgeLoop(session){
+  clearTimeout(badgeTimer);
+  prepareBadgeScanner().then(()=>{
+    const tick=async()=>{
+      if(!isActive()||cameraSession!==session)return;
+      if(badgeScannerType!=='unavailable')await scanBadgeVideo();
+      if(isActive()&&cameraSession===session)badgeTimer=setTimeout(tick,1150);
+    };
+    if(isActive()&&cameraSession===session)tick();
+  });
+}
+
+$('knownTrack').addEventListener('change',refreshPersonSelector);
+$('assignZyyBtn').addEventListener('click',()=>assignZyyToTrack(getSelectedPersonTrack(),'manual'));
+$('calibrateBtn').addEventListener('click',calibrateHeight);
+$('mergeBtn').addEventListener('click',()=>mergeLogEvent($('duplicateSource').value,$('duplicateTarget').value));
+$('clearLogBtn').addEventListener('click',clearObjectLog);
+$('exportCsvBtn').addEventListener('click',exportObjectCSV);
+video.addEventListener('ended',()=>{if(mediaMode==='file')$('cameraHint').textContent='Video selesai • catatan tetap tersimpan. Tekan Matikan untuk memilih ulang.';});
+loadObjectLog();
 
 $('activateBtn').addEventListener('click',startCamera);
 $('startBtn').addEventListener('click',startCamera);
@@ -640,7 +891,7 @@ $('laneSwitch').addEventListener('change',e=>{showLane=e.target.checked;refreshB
 $('trailSwitch').addEventListener('change',e=>{showTrail=e.target.checked;});
 $('depthOverlaySwitch').addEventListener('change',e=>{showDepthOverlay=e.target.checked;});
 window.addEventListener('pagehide',()=>{
-  clearInterval(recordingTimer);clearTimeout(detectionTimer);clearTimeout(laneTimer);clearTimeout(depthTimer);
+  clearInterval(recordingTimer);clearTimeout(detectionTimer);clearTimeout(laneTimer);clearTimeout(depthTimer);clearTimeout(badgeTimer);
   try{if(recorder?.state==='recording')recorder.stop();}catch(_){/*noop*/}
   stream?.getTracks().forEach(t=>t.stop());
   if(fileUrl)URL.revokeObjectURL(fileUrl);
